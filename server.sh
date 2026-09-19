@@ -16,7 +16,8 @@ esac
 [ -d "$VAULT" ] || { echo "vault not found: $VAULT" >&2; exit 1; }
 
 ./build-helper.sh
-(cd server && go build -o supersearch-server .)
+# sqlite_fts5: full-text search in the C SQLite driver. Stripped: a third smaller.
+(cd server && CGO_ENABLED=1 go build -tags sqlite_fts5 -trimpath -ldflags="-s -w" -o supersearch-server .)
 
 if [ "${1:-}" = "-q" ]; then
 	exec server/supersearch-server -vault "$VAULT" -query "$2"

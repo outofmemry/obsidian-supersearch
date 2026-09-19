@@ -10,7 +10,8 @@ DEST="$VAULT/.obsidian/plugins/supersearch"
 [ -d "$VAULT/.obsidian" ] || { echo "not an Obsidian vault: $VAULT" >&2; exit 1; }
 
 ./build-helper.sh
-(cd server && go build -o supersearch-server .)
+# sqlite_fts5: full-text search in the C SQLite driver. Stripped: a third smaller.
+(cd server && CGO_ENABLED=1 go build -tags sqlite_fts5 -trimpath -ldflags="-s -w" -o supersearch-server .)
 (cd plugin && npm install --silent && npm run build --silent)
 
 mkdir -p "$DEST"

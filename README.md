@@ -10,7 +10,7 @@ Obsidian itself, so large vaults make the app slow and laggy. Supersearch moves
 all of that work into a small local server that the plugin starts and stops
 for you. Obsidian holds no index at all: the plugin is just a search box.
 
-- Keyword results in about **1–3 ms** (tested on a vault with 469 notes, 1,763 images and a 265-page PDF)
+- Results in **under 1 ms for specific searches and about 5 ms for the broadest ones** (tested on a vault with 469 notes, 1,763 images and a 265-page PDF)
 - Reads text inside images with **Apple's built-in OCR**, about 24 images per second on an M2
 - Runs **100% on your Mac**: no cloud, no accounts, nothing uploaded
 
@@ -83,7 +83,7 @@ Supersearch runs **only on macOS**; see the note at the top for why.
 | | Version | Check with |
 |---|---|---|
 | macOS | **26 (Tahoe) or later**, Apple silicon | `sw_vers` |
-| Xcode Command Line Tools (for `swiftc`) | current | `swiftc --version` |
+| Xcode Command Line Tools (Swift and C compilers) | current | `swiftc --version` |
 | Go | 1.27 or later | `go version` |
 | Node.js and npm | 18 or later | `node --version` |
 | Obsidian | 1.4 or later | |
@@ -236,8 +236,11 @@ Combine them: `fcfs in:image path:"Operating System"`.
   repeated unless the file changes.
 - **Edits jump the queue.** Notes have their own lane, so a big OCR backlog
   never delays a note you just changed.
-- **Models stay loaded.** OCR keeps Vision's model in a long-running helper,
-  about 2× faster than starting a process per image.
+- **Models stay loaded while there's work.** OCR keeps Vision's model in a
+  long-running helper, about 2× faster than starting a process per image. Idle
+  helpers stop after 30 seconds, so the server sits at about 30 MB.
+- **Snippets only for what you see.** Results are ranked first, and the
+  highlighted excerpts are built only for the rows that are shown.
 - **Resumable.** Big PDFs are OCR'd 8 pages at a time and saved as they go, so
   closing Obsidian never loses progress.
 

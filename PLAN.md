@@ -126,8 +126,16 @@ make test              # Go tests incl. real Vision OCR, PDF, audio, on-device L
 ## Status
 
 Measured on the real vault (469 notes, 1,763 images, one 265-page PDF):
-note index 0.5 s; rescan 11 ms; keyword queries 0.3–3 ms. Vision OCR on an M2
-(the model stays loaded in one long-running helper per worker; one process per
+full text index (notes + the PDF's text layer) 0.8 s; rescan 11 ms; idle server
+30 MB and 0.08% CPU, with no helpers loaded (they stop after 30 s idle; three
+idle OCR helpers used to hold 280 MB). Queries (median, `server/bench_test.go`):
+specific ones 0.1–0.7 ms, "process" 2.3 ms, "the" 5.4 ms, a single letter 7 ms.
+"the" was 32 ms and a single letter 54 ms before three changes: snippets only
+for the rows shown, a 1-letter prefix index, and the C SQLite library
+(mattn/go-sqlite3, 2.3× faster than the pure-Go port on every query; SQLite
+cache and mmap pragmas and an FTS5 `optimize` were measured and made no
+difference). Vision OCR on an M2
+(the model stays loaded in one helper per worker while there is work; one process per
 image was 230 ms each): 1 worker 9 images/s, 2 → 17, 3 → 24, 4 → 27. With the
 default of 3, all 1,763 images take 77 s. Ask takes about 2–4 s.
 

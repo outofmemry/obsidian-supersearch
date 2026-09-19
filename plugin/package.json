@@ -1,0 +1,14 @@
+{
+  "name": "supersearch-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc --noEmit && esbuild main.ts --bundle --platform=node --format=cjs --target=es2020 --external:obsidian --external:electron --outfile=main.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "latest",
+    "typescript": "^5.6.0"
+  }
+}

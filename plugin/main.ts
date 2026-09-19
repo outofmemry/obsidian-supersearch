@@ -38,6 +38,7 @@ export default class Supersearch extends Plugin {
 	private restarting = false;
 	private unloading = false;
 	private warnedMissing = false;
+	private idleTicks = 0;
 
 	async onload() {
 		this.settings = { ...DEFAULTS, ...(await this.loadData()) };
@@ -164,9 +165,17 @@ export default class Supersearch extends Plugin {
 		let url = "/search?limit=50&q=" + encodeURIComponent(q);
 		for (const p of scope ?? []) url += "&scope=" + encodeURIComponent(p);
 		const res = await this.api(url);
-		const embeddedIn = new Map<string, string>(); // attachment → first note that embeds it
-		for (const [note, dests] of Object.entries(this.app.metadataCache.resolvedLinks))
-			for (const dest in dests) if (!embeddedIn.has(dest)) embeddedIn.set(dest, note);
+		// attachment → first note that embeds it. Built only when a result needs
+		// it: walking every link in the vault on each keystroke adds up on big vaults.
+		let embeddedIn: Map<string, string> | undefined;
+		const hostOf = (path: string) => {
+			if (!embeddedIn) {
+				embeddedIn = new Map();
+				for (const [note, dests] of Object.entries(this.app.metadataCache.resolvedLinks))
+					for (const dest in dests) if (!embeddedIn.has(dest)) embeddedIn.set(dest, note);
+			}
+			return embeddedIn.get(path);
+		};
 		const results: Result[] = [];
 		for (const r of res.results as Result[]) {
 			// Self-healing: a hit whose file is gone (a delete event got lost) is
@@ -176,7 +185,7 @@ export default class Supersearch extends Plugin {
 				continue;
 			}
 			// Text found inside an image or recording is presented as the note that embeds it.
-			results.push(r.kind === "image" || r.kind === "audio" ? { ...r, note: embeddedIn.get(r.path) } : r);
+			results.push(r.kind === "image" || r.kind === "audio" ? { ...r, note: hostOf(r.path) } : r);
 		}
 		let info = res.corrected ? `Showing results for "${res.corrected}"` : "";
 		if (!results.length && this.left) info = `No matches yet. Still indexing ${this.left} files…`;
@@ -193,6 +202,7 @@ export default class Supersearch extends Plugin {
 	}
 
 	changed(path: string, oldPath?: string) {
+		this.idleTicks = 0; // something may need indexing: check status on the next tick
 		this.api("/changed", { path, oldPath }).catch(() => {}); // dot-folders etc. are rejected by design; the periodic rescan is the safety net
 	}
 
@@ -230,7 +240,9 @@ export default class Supersearch extends Plugin {
 		this.app.workspace.revealLeaf(leaf);
 	}
 
+	// Polls every 5 s while there is work, every 30 s when idle.
 	private async refreshStatus(bar: HTMLElement) {
+		if (!this.left && this.idleTicks++ % 6) return;
 		try {
 			const s = await this.api("/status");
 			this.paused = s.paused;

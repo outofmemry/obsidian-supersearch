@@ -1,0 +1,9 @@
+{
+  "id": "supersearch",
+  "name": "Supersearch",
+  "version": "0.2.0",
+  "minAppVersion": "1.4.0",
+  "description": "Fast full-text search across notes, PDFs, images (OCR) and office docs, powered by a local Go server.",
+  "author": "Krish Makhijani",
+  "isDesktopOnly": false
+}

@@ -14,6 +14,17 @@ for you. Obsidian holds no index at all: the plugin is just a search box.
 - Reads text inside images with **Apple's built-in OCR**, about 24 images per second on an M2
 - Runs **100% on your Mac**: no cloud, no accounts, nothing uploaded
 
+> [!IMPORTANT]
+> **macOS only (Apple silicon, macOS 26+). There is no Windows or Linux version.**
+>
+> Supersearch reads images with **Apple's Vision framework** instead of
+> Tesseract, the open-source OCR engine most tools use. Vision is built into
+> macOS, so there's nothing to install, and it's both more accurate and faster.
+> On a real vault it read slide tables that Tesseract garbled, at about twice
+> Tesseract's speed. PDFs (PDFKit), audio transcription (SpeechAnalyzer) and
+> Ask your vault (Apple's on-device language model) also use Apple frameworks
+> that only exist on macOS.
+
 ---
 
 ## Contents
@@ -66,6 +77,8 @@ for you. Obsidian holds no index at all: the plugin is just a search box.
 ## Installation
 
 ### Requirements
+
+Supersearch runs **only on macOS**; see the note at the top for why.
 
 | | Version | Check with |
 |---|---|---|

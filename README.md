@@ -338,3 +338,9 @@ Don't leave `./server.sh` running while Obsidian is open: two servers on one
 vault do the same work twice.
 
 Design notes, measurements and known limits are in [PLAN.md](PLAN.md).
+
+---
+
+## License
+
+[MIT](LICENSE)

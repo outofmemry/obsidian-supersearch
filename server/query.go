@@ -207,7 +207,6 @@ func (ix *Index) run(qq query, scope []string, limit int) ([]Result, error) {
 	// bm25 is negative (lower = better); the recency factor scales it by up to
 	// 1.2 for a file edited today, fading over a few months.
 	rows, err := ix.db.Query(`SELECT chunks.rowid, f.path, f.kind, chunks.rowid & ?, chunks.source,
-			snippet(chunks, 2, char(2), char(3), '…', 24),
 			bm25(chunks, 8.0, 4.0, 1.0) * (1 + 0.2 * 30.0 / (30.0 + max(0, ? - f.mtime) / 86400000.0)) AS score
 		FROM chunks JOIN files f ON f.id = chunks.rowid >> ?
 		WHERE `+strings.Join(where, " AND ")+`
@@ -221,7 +220,7 @@ func (ix *Index) run(qq query, scope []string, limit int) ([]Result, error) {
 	byFile := map[string][]Result{}
 	for rows.Next() {
 		var r Result
-		if err := rows.Scan(&r.rowid, &r.Path, &r.Kind, &r.Page, &r.Source, &r.Snippet, &r.Score); err != nil {
+		if err := rows.Scan(&r.rowid, &r.Path, &r.Kind, &r.Page, &r.Source, &r.Score); err != nil {
 			return nil, err
 		}
 		if r.Kind == "text" && r.Page > 0 { // note section: page slot holds start line + 1
@@ -240,7 +239,40 @@ func (ix *Index) run(qq query, scope []string, limit int) ([]Result, error) {
 	if len(results) > limit {
 		results = results[:limit]
 	}
-	return results, rows.Err()
+	if err := rows.Err(); err != nil || len(results) == 0 {
+		return results, err
+	}
+	rows.Close()
+	return results, ix.snippets(match, results)
+}
+
+// snippets fills in the highlighted excerpts, only for the rows that are
+// shown: snippet() costs more than ranking, and running it on every ranked
+// candidate was 75% of a broad query like "the". The unary + keeps this one
+// scan of the matches; without it SQLite restarts the full-text query per
+// rowid, which is far slower (234 ms vs 7 ms for "t").
+func (ix *Index) snippets(match string, results []Result) error {
+	args := []any{match}
+	at := make(map[int64]int, len(results))
+	for i, r := range results {
+		args = append(args, r.rowid)
+		at[r.rowid] = i
+	}
+	rows, err := ix.db.Query(`SELECT rowid, snippet(chunks, 2, char(2), char(3), '…', 24) FROM chunks
+		WHERE chunks MATCH ? AND +rowid IN (?`+strings.Repeat(",?", len(results)-1)+`)`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var snippet string
+		if err := rows.Scan(&id, &snippet); err != nil {
+			return err
+		}
+		results[at[id]].Snippet = snippet
+	}
+	return rows.Err()
 }
 
 // correct replaces each word that matches nothing with the closest indexed

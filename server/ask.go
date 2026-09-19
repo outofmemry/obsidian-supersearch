@@ -19,18 +19,52 @@ const (
 	askChunkSize = 1000
 )
 
-// helperProc is one long-running `supersearch-helper serve`, restarted on failure.
+// helperIdle is how long an unused helper stays loaded. A loaded helper holds
+// 50-100 MB of Vision or language model (three idle OCR helpers were 280 MB
+// next to a 28 MB server); starting one again costs about 0.13 s.
+const helperIdle = 30 * time.Second
+
+// helperProc is a `supersearch-helper serve` process: started on first use,
+// kept while busy so models stay loaded, stopped once idle, restarted on failure.
 type helperProc struct {
-	nice bool // background work: run at low CPU priority
-	mu   sync.Mutex
-	cmd  *exec.Cmd
-	in   io.WriteCloser
-	out  *bufio.Reader
+	nice      bool          // background work: run at low CPU priority
+	idleAfter time.Duration // 0 = helperIdle
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	in        io.WriteCloser
+	out       *bufio.Reader
+	last      time.Time   // end of the latest call
+	idle      *time.Timer // fires stopIdle
+}
+
+func (h *helperProc) idleLimit() time.Duration {
+	if h.idleAfter > 0 {
+		return h.idleAfter
+	}
+	return helperIdle
+}
+
+// stopIdle ends the process unless a call finished within the idle limit.
+func (h *helperProc) stopIdle() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cmd != nil && time.Since(h.last) >= h.idleLimit() {
+		h.cmd.Process.Kill()
+		h.cmd.Wait()
+		h.cmd = nil
+	}
 }
 
 func (h *helperProc) call(req, resp any, timeout time.Duration) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.idle != nil {
+		h.idle.Stop()
+	}
+	defer func() {
+		h.last = time.Now()
+		h.idle = time.AfterFunc(h.idleLimit(), h.stopIdle)
+	}()
 	if h.cmd == nil {
 		cmd := exec.Command(helperPath, "serve")
 		if h.nice {

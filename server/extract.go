@@ -391,12 +391,28 @@ func (ix *Index) pdfOCR(j job, abs string) (pages []page, more bool, err error) 
 	return pages, more, nil
 }
 
+var pdfCache struct { // the last pdf's text: OCR batches of one book reuse it instead of re-reading the file each time
+	sync.Mutex
+	key   string
+	texts []string
+}
+
 func pdfPages(abs string) ([]string, error) {
+	key := abs
+	if info, err := os.Stat(abs); err == nil {
+		key += fmt.Sprint("|", info.ModTime().UnixNano(), "|", info.Size())
+	}
+	pdfCache.Lock()
+	defer pdfCache.Unlock()
+	if pdfCache.key == key {
+		return pdfCache.texts, nil
+	}
 	out, err := run(time.Minute, helperPath, "pdftext", abs)
 	if err != nil {
 		return nil, err
 	}
-	return strings.Split(strings.TrimSuffix(out, "\f"), "\f"), nil // every page ends with \f
+	pdfCache.key, pdfCache.texts = key, strings.Split(strings.TrimSuffix(out, "\f"), "\f") // every page ends with \f
+	return pdfCache.texts, nil
 }
 
 func sparse(s string) bool {

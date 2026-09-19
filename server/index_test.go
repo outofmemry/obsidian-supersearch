@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // makePDF builds a minimal pdf, one page per text with a real text layer
@@ -454,4 +455,33 @@ func TestPDFOCRResumes(t *testing.T) {
 	if status != "done" || ix.processOne("ocr", nil) {
 		t.Errorf("book not finished after its last batch: status %s", status)
 	}
+}
+
+func TestHelperStopsWhenIdle(t *testing.T) {
+	useHelper(t)
+	h := &helperProc{idleAfter: 200 * time.Millisecond}
+	ask := func() {
+		t.Helper()
+		var resp struct{ Answer, Error string }
+		if err := h.call(map[string]any{"op": "nope"}, &resp, time.Minute); err != nil || resp.Error == "" {
+			t.Fatalf("call: %v %+v", err, resp)
+		}
+	}
+	running := func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.cmd != nil
+	}
+	ask()
+	time.Sleep(100 * time.Millisecond)
+	ask() // still in use: the idle clock restarts
+	time.Sleep(150 * time.Millisecond)
+	if !running() {
+		t.Fatal("helper was stopped 150 ms after its last call (idle limit is 200 ms)")
+	}
+	time.Sleep(300 * time.Millisecond)
+	if running() {
+		t.Fatal("idle helper was not stopped")
+	}
+	ask() // and it comes back on demand
 }

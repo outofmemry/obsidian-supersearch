@@ -37,10 +37,15 @@ if [ -z "${SUPERSEARCH_TOKEN:-}" ]; then
 	echo "SUPERSEARCH_TOKEN is not set: put it in ./.env (see .env.example) or export it" >&2
 	exit 1
 fi
+# Fixed local port so manual runs (and phone/Tailscale setups) keep the
+# same address. Override per-run with ./server.sh -listen 127.0.0.1:PORT
+# (a later -listen flag wins) or via SUPERSEARCH_LISTEN in .env.
+LISTEN="${SUPERSEARCH_LISTEN:-127.0.0.1:54999}"
 export SUPERSEARCH_TOKEN
 
-# The port is random; it's printed as "LISTENING <port>". Then:
-#   curl -H "Authorization: Bearer $SUPERSEARCH_TOKEN" "http://127.0.0.1:<port>/search?q=hello"
+# The server prints "LISTENING <port>" on start. Then:
+#   curl -H "Authorization: Bearer $SUPERSEARCH_TOKEN" "http://127.0.0.1:54999/search?q=hello"
 echo "vault: $VAULT"
+echo "listen: $LISTEN"
 if [ -f .env ]; then echo "token: loaded from .env"; else echo "token: from environment"; fi
-exec server/supersearch-server -vault "$VAULT" "$@"
+exec server/supersearch-server -vault "$VAULT" -listen "$LISTEN" "$@"

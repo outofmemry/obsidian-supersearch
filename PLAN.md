@@ -80,7 +80,9 @@ A query with no hits is retried with typo correction ("schedulng" →
 "scheduling", shown as *Showing results for…*).
 
 Settings: ignored folders, OCR languages (e.g. `en-US,hi-IN`; changing re-reads
-images and recordings),
+images and recordings), fall back to local server (desktop only: when the
+remote is unreachable, the local index serves and the remote is re-probed
+until it answers),
 remote server URL + token. The server reads them from the plugin's `data.json`,
 not from flags, so every server on the vault (plugin, `./server.sh`, remote)
 uses the same settings. Two servers with different settings used to make each

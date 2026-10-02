@@ -19,9 +19,10 @@ interface Settings {
 	ocrLang: string;
 	serverUrl: string; // remote server; empty = run one locally
 	serverToken: string;
+	fallbackLocal: boolean; // desktop only: use the local index when the remote is unreachable
 }
 
-const DEFAULTS: Settings = { ignore: "", ocrLang: "", serverUrl: "", serverToken: "" };
+const DEFAULTS: Settings = { ignore: "", ocrLang: "", serverUrl: "", serverToken: "", fallbackLocal: true };
 const VIEW = "supersearch-view";
 
 // The plugin holds no index. It runs the Go sidecar (or talks to a remote
@@ -38,6 +39,14 @@ export default class Supersearch extends Plugin {
 	private unloading = false;
 	private warnedMissing = false;
 	private idleTicks = 0;
+	// Remote fallback (desktop only): while Server URL is set but unreachable,
+	// the local index serves instead, and the remote is re-probed in the
+	// background until it answers again.
+	private remoteBase = "";
+	private remoteToken = "";
+	private onFallback = false;
+	private remoteFails = 0;
+	private lastFallbackTry = 0;
 
 	async onload() {
 		this.settings = { ...DEFAULTS, ...(await this.loadData()) };
@@ -95,14 +104,26 @@ export default class Supersearch extends Plugin {
 
 	private startServer() {
 		const { serverUrl, serverToken } = this.settings;
-		if (serverUrl.trim()) {
-			this.token = serverToken;
-			this.base = Promise.resolve(serverUrl.trim().replace(/\/+$/, ""));
+		this.remoteBase = serverUrl.trim().replace(/\/+$/, "");
+		this.remoteToken = serverToken;
+		this.onFallback = false;
+		this.remoteFails = 0;
+		if (this.remoteBase) {
+			// Remote mode: no local server is spawned. On desktop the status
+			// tick fails over to the local index if the remote goes quiet.
+			this.token = this.remoteToken;
+			this.base = Promise.resolve(this.remoteBase);
 			return;
 		}
+		this.startLocal();
+	}
+
+	// Spawns the bundled server. Returns true when a local server is running.
+	private startLocal(): boolean {
+		if (this.server) return true;
 		if (!Platform.isDesktopApp) {
 			new Notice("Supersearch: on mobile, set a remote server in the plugin settings.", 10000);
-			return;
+			return false;
 		}
 		// Node modules only exist on desktop; loading them lazily keeps the plugin loadable on mobile.
 		const { spawn } = require("child_process") as typeof import("child_process");
@@ -112,7 +133,7 @@ export default class Supersearch extends Plugin {
 		const bin = join(vault, this.manifest.dir!, "supersearch-server");
 		if (!existsSync(bin)) {
 			new Notice("Supersearch: server binary not found in the plugin folder. Run ./install.sh.", 10000);
-			return;
+			return false;
 		}
 		this.token = Array.from(crypto.getRandomValues(new Uint8Array(24)), (b) => b.toString(16).padStart(2, "0")).join("");
 		// The server reads OCR settings and ignored folders from this plugin's data.json itself.
@@ -143,6 +164,49 @@ export default class Supersearch extends Plugin {
 				new Notice(`Supersearch: server stopped (exit ${code}). Reload the plugin to retry.`, 10000);
 			}
 		});
+		return true;
+	}
+
+	// Switches the active backend to the local index after the remote went
+	// quiet. At most one attempt per minute, so a missing binary can't spam.
+	private startFallback() {
+		if (Date.now() - this.lastFallbackTry < 60000) return;
+		this.lastFallbackTry = Date.now();
+		if (!this.startLocal()) return;
+		this.onFallback = true;
+		this.remoteFails = 0;
+		new Notice("Supersearch: remote server unreachable, using the local index. It switches back automatically.", 8000);
+	}
+
+	// The background probe answered again: drop the local server and go back
+	// to the remote. Routing through the exit handler keeps the restart logic
+	// (and crash guard) in one place.
+	private stopFallback() {
+		if (!this.onFallback) return;
+		this.onFallback = false;
+		this.remoteFails = 0;
+		new Notice("Supersearch: remote server reachable again.", 5000);
+		if (this.server) {
+			this.restarting = true;
+			this.server.kill();
+		} else {
+			this.startServer();
+		}
+	}
+
+	// Quick remote health check, independent of the active backend.
+	private async probeRemote(): Promise<any> {
+		const res = (await Promise.race([
+			requestUrl({
+				url: this.remoteBase + "/status",
+				method: "GET",
+				headers: { Authorization: "Bearer " + this.remoteToken },
+				throw: false,
+			}),
+			new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+		])) as any;
+		if (!res || res.status >= 400) throw new Error("remote status " + (res?.status ?? "failed"));
+		return res.json;
 	}
 
 	async api(path: string, body?: unknown) {
@@ -188,6 +252,7 @@ export default class Supersearch extends Plugin {
 		}
 		let info = res.corrected ? `Showing results for "${res.corrected}"` : "";
 		if (!results.length && this.left) info = `No matches yet. Still indexing ${this.left} files…`;
+		if (this.onFallback) info += (info ? " · " : "") + "local index";
 		return { results, info };
 	}
 
@@ -239,20 +304,41 @@ export default class Supersearch extends Plugin {
 		this.app.workspace.revealLeaf(leaf);
 	}
 
-	// Polls every 5 s while there is work, every 30 s when idle.
+	// Polls every 5 s while there is work, every 30 s when idle. While a remote
+	// backend is active with fallback enabled, every tick probes the remote so
+	// a dead server fails over within seconds; while on fallback, the local
+	// status is polled as usual and the remote is re-probed in the background.
 	private async refreshStatus(bar: HTMLElement) {
-		if (!this.left && this.idleTicks++ % 6) return;
-		try {
-			const s = await this.api("/status");
-			this.paused = s.paused;
-			const left = (this.left = s.counts.pending + s.counts.ocr);
-			bar.setText(!left ? "" : s.paused ? `Supersearch: paused, ${left} left` : `Supersearch: indexing, ${left} left`);
-			if (s.missing.length && !this.warnedMissing) {
-				this.warnedMissing = true;
-				new Notice("Supersearch: supersearch-helper is missing, so PDFs and images can't be read. Re-run ./install.sh.", 15000);
+		const watchRemote = Platform.isDesktopApp && this.settings.fallbackLocal && !!this.remoteBase && !this.onFallback;
+		if (!this.left && !watchRemote && this.idleTicks++ % 6) return;
+		if (watchRemote) {
+			try {
+				this.applyStatus(await this.probeRemote(), bar);
+				this.remoteFails = 0;
+			} catch {
+				if (++this.remoteFails >= 2) this.startFallback();
+				else bar.setText("Supersearch: remote unreachable, retrying…");
 			}
+			return;
+		}
+		try {
+			this.applyStatus(await this.api("/status"), bar);
 		} catch {
 			bar.setText("");
+		}
+		if (this.onFallback) this.probeRemote().then(
+			() => this.stopFallback(),
+			() => {},
+		);
+	}
+
+	private applyStatus(s: any, bar: HTMLElement) {
+		this.paused = s.paused;
+		const left = (this.left = s.counts.pending + s.counts.ocr);
+		bar.setText(!left ? "" : s.paused ? `Supersearch: paused, ${left} left` : `Supersearch: indexing, ${left} left`);
+		if (s.missing.length && !this.warnedMissing) {
+			this.warnedMissing = true;
+			new Notice("Supersearch: supersearch-helper is missing, so PDFs and images can't be read. Re-run ./install.sh.", 15000);
 		}
 	}
 }
@@ -509,5 +595,11 @@ class SettingsTab extends PluginSettingTab {
 				t.setValue(s.serverToken).onChange(async (v) => ((s.serverToken = v), save()));
 				t.inputEl.addEventListener("blur", apply);
 			});
+		if (Platform.isDesktopApp) {
+			new Setting(containerEl)
+				.setName("Fall back to local server")
+				.setDesc("When the remote server is unreachable, run the local index instead and switch back automatically.")
+				.addToggle((t) => t.setValue(s.fallbackLocal).onChange(async (v) => ((s.fallbackLocal = v), await save(), apply())));
+		}
 	}
 }

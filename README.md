@@ -197,6 +197,7 @@ Combine them: `fcfs in:image path:"Operating System"`.
 | **OCR languages** | e.g. `en-US,hi-IN`. Empty means English; `auto` means detect. Changing this re-reads images and recordings. |
 | **Delete search index** | Same as the command. Your notes are never touched. |
 | **Server URL / token** | Use a server on another machine (see [phone setup](#search-from-your-phone-optional)). Leave empty normally. |
+| **Fall back to local server** | Desktop only: when the remote server is unreachable, run the local index instead and switch back automatically. |
 
 ---
 

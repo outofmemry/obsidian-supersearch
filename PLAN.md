@@ -47,7 +47,7 @@ Obsidian plugin (TS)                     supersearch-server (Go, one binary)
 |---|---|---|
 | Notes | .md | split at headings: each section is a result that opens at its line; heading + #tags + frontmatter tags rank above body text |
 | Text / code | .txt .canvas .csv .json .yaml .go .py .ts … | read as-is |
-| PDF | .pdf | PDFKit text per page; pages without text → Vision OCR, 8 pages per job and saved as it goes (a restart resumes); optional OCR of figures on text pages |
+| PDF | .pdf | PDFKit text per page, no OCR (a scanned page with no text layer contributes no content) |
 | Images | .png .jpg .webp .heic .gif .tiff … | Apple Vision OCR (lines rebuilt in reading order, Cyrillic look-alikes folded, transparency flattened) |
 | Audio | .m4a .mp3 .wav .aac .flac .mp4 .mov … | Apple on-device speech-to-text |
 | Office | .docx .pptx .xlsx · .doc .rtf .odt | zip+XML in Go · macOS `textutil` |
@@ -67,6 +67,7 @@ Query syntax:
 | Query | Meaning |
 |---|---|
 | `sched` | prefix match (finds "scheduling") |
+| `DynamicArrays` | spaceless words split into known words, each typo-tolerant |
 | `"round robin"` | exact phrase |
 | `-passing` | exclude word |
 | `path:"Operating System"` / `-path:Archive` | path contains / doesn't |
@@ -79,7 +80,7 @@ A query with no hits is retried with typo correction ("schedulng" →
 "scheduling", shown as *Showing results for…*).
 
 Settings: ignored folders, OCR languages (e.g. `en-US,hi-IN`; changing re-reads
-images and recordings), OCR figures inside PDFs (changing re-reads PDFs only),
+images and recordings),
 remote server URL + token. The server reads them from the plugin's `data.json`,
 not from flags, so every server on the vault (plugin, `./server.sh`, remote)
 uses the same settings. Two servers with different settings used to make each
@@ -148,6 +149,7 @@ on a phone, which are type-checked but need a manual look.
 | Shortcut | Ceiling | Upgrade path |
 |---|---|---|
 | macOS-only helper | No Windows/Linux | tesseract + poppler fallback behind the same helper commands |
+| PDFs are text layer only | Scanned PDFs with no text layer are not searchable | render pages + Vision OCR behind the same pdftext path |
 | No .webm/.ogg audio | Apple's decoder can't read them | ffmpeg conversion step |
 | Typo correction scans vocab words by first letter | First-letter typos not corrected | trigram index over vocab |
 | Remote mode has token auth only | Needs Tailscale/HTTPS in front | built-in TLS |

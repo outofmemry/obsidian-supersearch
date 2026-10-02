@@ -12,11 +12,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 )
 
 var kinds = map[string]string{
@@ -47,21 +45,17 @@ func init() {
 func kindOf(p string) string { return kinds[strings.ToLower(filepath.Ext(p))] }
 
 const (
-	maxText      = 16 << 20 // per file / per zip entry; also bounds zip bombs
-	minPageChars = 20       // a pdf page with less text than this is treated as scanned
+	maxText = 16 << 20 // per file / per zip entry; also bounds zip bombs
 )
 
-// Set by main from the plugin's settings. Part of the configs below:
-// changing one redoes only the files it affects.
+// Set by main from the plugin's settings.
 var (
 	helperPath = "supersearch-helper" // Apple Vision + PDFKit, see helper/main.swift
 	ocrLang    = ""                   // comma-separated BCP-47, "" = en-US
-	ocrFigures = false                // also OCR pdf pages that have a text layer
 )
 
-// mediaConfig covers images and audio; pdfConfig covers pdfs.
+// mediaConfig covers images and audio (the only kinds that use OCR/speech).
 func mediaConfig() string { return "vision1|" + normLang(ocrLang) }
-func pdfConfig() string   { return fmt.Sprintf("vision1|%s|%t", normLang(ocrLang), ocrFigures) }
 
 func normLang(l string) string {
 	if l = strings.ReplaceAll(l, " ", ""); l == "" {
@@ -72,6 +66,10 @@ func normLang(l string) string {
 
 // processOne runs one job in the given status. false = nothing to do.
 // h is this worker's helper process for image OCR (nil in the fast lane).
+// PDFs always take the text-layer path, even if an old index left them in
+// ocr status: Vision OCR never runs on rendered PDF pages, so a short title
+// page keeps its exact text instead of being replaced by an OCR misread
+// ("Dynamic Arrays" -> "Oganic Armys").
 func (ix *Index) processOne(status string, h *helperProc) bool {
 	j, ok := ix.next(status)
 	if !ok {
@@ -81,31 +79,17 @@ func (ix *Index) processOne(status string, h *helperProc) bool {
 	abs := filepath.Join(ix.vault, filepath.FromSlash(j.rel))
 	var pages []page
 	var err error
-	next, replaceAll := "done", true
-	if status == "ocr" && j.kind == "pdf" {
-		var more bool
-		pages, more, err = ix.pdfOCR(j, abs)
-		replaceAll = false // keep the text pages and the batches already done
-		if more {
-			next = "ocr"
-		}
-	} else if status == "ocr" {
+	if status == "ocr" && j.kind != "pdf" {
 		pages, err = ocr(abs, j.kind, h)
 	} else {
-		var needOCR bool
-		pages, needOCR, err = extract(abs, j.kind)
-		if needOCR {
-			next = "ocr"
-		}
+		pages, err = extract(abs, j.kind)
 	}
-	msg := ""
+	next, msg := "done", ""
 	if err != nil {
 		next, msg, pages = "error", err.Error(), nil
-		if replaceAll { // keep the file findable by name even though its content failed
-			pages = []page{{source: "text"}}
-		}
+		pages = []page{{source: "text"}} // keep the file findable by name even though its content failed
 	}
-	if err := ix.store(j, pages, replaceAll, next, msg); err != nil {
+	if err := ix.store(j, pages, next, msg); err != nil {
 		fmt.Fprintln(os.Stderr, "store:", j.rel, err)
 		time.Sleep(time.Second) // don't spin on a broken db
 	}
@@ -147,25 +131,26 @@ func onBattery() bool {
 	return battery.on
 }
 
-// extract is the cheap first pass: everything except OCR.
-func extract(abs, kind string) (pages []page, needOCR bool, err error) {
-	one := func(body string, err error) ([]page, bool, error) {
-		return []page{{source: "text", body: body}}, false, err
+// extract is the cheap first pass: everything except image OCR and audio
+// transcription. PDFs are text layer only, page by page.
+func extract(abs, kind string) (pages []page, err error) {
+	one := func(body string, err error) ([]page, error) {
+		return []page{{source: "text", body: body}}, err
 	}
 	switch kind {
 	case "text":
 		b, err := readCapped(abs)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		if ext := strings.ToLower(filepath.Ext(abs)); ext == ".md" || ext == ".markdown" {
-			return markdownSections(string(b)), false, nil
+			return markdownSections(string(b)), nil
 		}
 		return one(string(b), nil)
 	case "html":
 		b, err := readCapped(abs)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		var sb strings.Builder
 		xmlText(bytes.NewReader(b), &sb)
@@ -183,22 +168,26 @@ func extract(abs, kind string) (pages []page, needOCR bool, err error) {
 	case "textutil":
 		return one(run(time.Minute, "textutil", "-convert", "txt", "-stdout", abs))
 	case "pdf":
-		texts, err := pdfPages(abs)
-		if err != nil {
-			return nil, false, err
-		}
-		for i, t := range texts {
-			if sparse(t) {
-				needOCR = true
-				t = ""
-			}
-			if t != "" || i == 0 { // page 1 always exists: it carries the file name
-				pages = append(pages, page{n: i + 1, source: "text", body: t})
-			}
-		}
-		return pages, needOCR || (ocrFigures && len(texts) > 0), nil
+		return pdfText(abs)
 	}
-	return nil, false, fmt.Errorf("no extractor for kind %q", kind)
+	return nil, fmt.Errorf("no extractor for kind %q", kind)
+}
+
+// pdfText reads the PDF text layer page by page. No OCR is attempted: a
+// rendered page fed to Vision replaces exact text with misreads, and a
+// scanned page with no text layer simply contributes no content.
+func pdfText(abs string) ([]page, error) {
+	texts, err := pdfPages(abs)
+	if err != nil {
+		return nil, err
+	}
+	var pages []page
+	for i, t := range texts {
+		if t != "" || i == 0 { // page 1 always exists: it carries the file name
+			pages = append(pages, page{n: i + 1, source: "text", body: t})
+		}
+	}
+	return pages, nil
 }
 
 func readCapped(abs string) ([]byte, error) {
@@ -333,65 +322,7 @@ func ocr(abs, kind string, h *helperProc) ([]page, error) {
 	return nil, fmt.Errorf("no OCR for kind %q", kind)
 }
 
-var pdfBatch = 8 // pages per OCR job; a var so tests can shrink it
-
-// pdfOCR OCRs the next pdfBatch pages that need it (no text layer, or every
-// page with ocrFigures). A page stored with source "ocr" is done, so progress
-// survives restarts: a 265-page book used to be one job that was killed and
-// started over from page 1 every time Obsidian closed, and never finished.
-func (ix *Index) pdfOCR(j job, abs string) (pages []page, more bool, err error) {
-	texts, err := pdfPages(abs)
-	if err != nil {
-		return nil, false, err
-	}
-	done := map[int]bool{}
-	rows, err := ix.db.Query(`SELECT rowid & ?, source FROM chunks WHERE rowid BETWEEN ? AND ?`,
-		1<<pageBits-1, j.id<<pageBits, (j.id+1)<<pageBits-1)
-	if err != nil {
-		return nil, false, err
-	}
-	for rows.Next() {
-		var n int
-		var src string
-		rows.Scan(&n, &src)
-		done[n] = src == "ocr"
-	}
-	rows.Close()
-	var todo []int
-	for i, t := range texts {
-		if (sparse(t) || ocrFigures) && !done[i+1] {
-			todo = append(todo, i+1)
-		}
-	}
-	more = len(todo) > pdfBatch
-	todo = todo[:min(len(todo), pdfBatch)]
-	if len(todo) == 0 {
-		return nil, false, nil
-	}
-	nums := make([]string, len(todo))
-	for k, n := range todo {
-		nums[k] = strconv.Itoa(n)
-	}
-	out, err := run(time.Minute+time.Duration(len(todo))*10*time.Second,
-		"nice", "-n", "15", helperPath, "pdfocr", abs, strings.Join(nums, ","), ocrLang)
-	if err != nil {
-		return nil, false, err
-	}
-	bodies := strings.Split(strings.TrimSuffix(out, "\f"), "\f")
-	for k, n := range todo {
-		body := ""
-		if k < len(bodies) {
-			body = bodies[k]
-		}
-		if t := texts[n-1]; !sparse(t) { // figure OCR: keep the text layer, add what the images say
-			body = t + "\n" + body
-		}
-		pages = append(pages, page{n: n, source: "ocr", body: body})
-	}
-	return pages, more, nil
-}
-
-var pdfCache struct { // the last pdf's text: OCR batches of one book reuse it instead of re-reading the file each time
+var pdfCache struct { // the last pdf's text, so back-to-back reads reuse it
 	sync.Mutex
 	key   string
 	texts []string
@@ -413,18 +344,6 @@ func pdfPages(abs string) ([]string, error) {
 	}
 	pdfCache.key, pdfCache.texts = key, strings.Split(strings.TrimSuffix(out, "\f"), "\f") // every page ends with \f
 	return pdfCache.texts, nil
-}
-
-func sparse(s string) bool {
-	n := 0
-	for _, r := range s {
-		if !unicode.IsSpace(r) {
-			if n++; n >= minPageChars {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func run(timeout time.Duration, name string, args ...string) (string, error) {

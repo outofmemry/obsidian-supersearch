@@ -2,7 +2,6 @@
 //
 //   supersearch-helper ocr <image> [langs]          → recognized text
 //   supersearch-helper pdftext <pdf>                → text layer, pages ended by \f
-//   supersearch-helper pdfocr <pdf> <1,4,…> [langs] → OCR of those pages, each ended by \f
 //   supersearch-helper transcribe <audio> [lang]    → speech-to-text, on device
 //   supersearch-helper serve                        → JSON lines on stdin/stdout:
 //     {"op":"ocr","path":…,"langs":…}         → {"answer":text} or {"error":…}  (Vision, model stays loaded)
@@ -80,24 +79,6 @@ func onWhite(_ image: CGImage) -> CGImage {
     return ctx.makeImage() ?? image
 }
 
-// Renders one pdf page on white at 2x (144 dpi), long side capped so huge
-// posters don't eat memory.
-func render(_ page: CGPDFPage) -> CGImage? {
-    let box = page.getBoxRect(.cropBox)
-    let scale = min(2.0, 4000 / max(box.width, box.height, 1))
-    let w = Int(box.width * scale), h = Int(box.height * scale)
-    guard w > 0, h > 0, let ctx = CGContext(
-        data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
-        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
-    else { return nil }
-    ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-    ctx.scaleBy(x: scale, y: scale)
-    ctx.translateBy(x: -box.minX, y: -box.minY)
-    ctx.drawPDFPage(page)
-    return ctx.makeImage()
-}
-
 struct Request: Decodable {
     let op: String
     var instructions: String?
@@ -153,7 +134,7 @@ if args.count == 2 && args[1] == "serve" {
     await serve()
     exit(0)
 }
-guard args.count >= 3 else { fail("usage: supersearch-helper ocr|pdftext|pdfocr <file> … | serve") }
+guard args.count >= 3 else { fail("usage: supersearch-helper ocr|pdftext <file> … | serve") }
 let url = URL(fileURLWithPath: args[2])
 func splitLangs(_ s: String?) -> [String] {
     (s ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -198,17 +179,6 @@ case "pdftext":
     if doc.isLocked { fail("pdf is encrypted") }
     for i in 0..<doc.pageCount {
         out += (doc.page(at: i)?.string ?? "") + "\u{0C}"
-    }
-
-case "pdfocr":
-    guard args.count >= 4, let doc = CGPDFDocument(url as CFURL) else { fail("cannot open pdf") }
-    for n in args[3].split(separator: ",").compactMap({ Int($0) }) {
-        autoreleasepool {
-            if let page = doc.page(at: n), let image = render(page) { // CGPDF pages are 1-based
-                out += recognize(image, langs(4))
-            }
-        }
-        out += "\u{0C}"
     }
 
 default:

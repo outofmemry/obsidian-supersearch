@@ -17,12 +17,11 @@ interface Result {
 interface Settings {
 	ignore: string; // one vault folder per line
 	ocrLang: string;
-	ocrPdfFigures: boolean;
 	serverUrl: string; // remote server; empty = run one locally
 	serverToken: string;
 }
 
-const DEFAULTS: Settings = { ignore: "", ocrLang: "", ocrPdfFigures: false, serverUrl: "", serverToken: "" };
+const DEFAULTS: Settings = { ignore: "", ocrLang: "", serverUrl: "", serverToken: "" };
 const VIEW = "supersearch-view";
 
 // The plugin holds no index. It runs the Go sidecar (or talks to a remote
@@ -490,10 +489,6 @@ class SettingsTab extends PluginSettingTab {
 				t.setPlaceholder("en-US").setValue(s.ocrLang).onChange(async (v) => ((s.ocrLang = v), save()));
 				t.inputEl.addEventListener("blur", apply);
 			});
-		new Setting(containerEl)
-			.setName("OCR figures inside PDFs")
-			.setDesc("Also read text in images on PDF pages that already have text. Slower indexing. Changing this re-reads PDFs only.")
-			.addToggle((t) => t.setValue(s.ocrPdfFigures).onChange(async (v) => ((s.ocrPdfFigures = v), await save(), apply())));
 		new Setting(containerEl)
 			.setName("Delete search index")
 			.setDesc("Deletes all stored search data (not your notes). It rebuilds in the background while the plugin is enabled.")

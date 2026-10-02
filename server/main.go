@@ -215,9 +215,8 @@ func vaultPath(rel string) bool {
 // the ignored folders. A missing file means defaults.
 func loadSettings(file string) ([]string, error) {
 	var s struct {
-		Ignore        string
-		OcrLang       string
-		OcrPdfFigures bool
+		Ignore  string
+		OcrLang string
 	}
 	b, err := os.ReadFile(file)
 	if os.IsNotExist(err) {
@@ -229,7 +228,7 @@ func loadSettings(file string) ([]string, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, err
 	}
-	ocrLang, ocrFigures = s.OcrLang, s.OcrPdfFigures
+	ocrLang = s.OcrLang
 	var ignore []string
 	for _, dir := range strings.Split(s.Ignore, "\n") {
 		if dir = strings.Trim(filepath.ToSlash(strings.TrimSpace(dir)), "/"); dir != "" {

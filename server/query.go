@@ -21,6 +21,22 @@ type term struct {
 	text   string
 	phrase bool
 	alts   []string // typo corrections; when set they replace text
+	parts  []term   // spaceless compound split ("dynamicarrays" -> dynamic + arrays); when set it replaces text
+}
+
+// display is the human-readable form used in the "Showing results for…" note.
+func (t term) display() string {
+	if len(t.parts) > 0 {
+		ws := make([]string, len(t.parts))
+		for i, p := range t.parts {
+			ws[i] = p.display()
+		}
+		return strings.Join(ws, " ")
+	}
+	if len(t.alts) > 0 {
+		return t.alts[0]
+	}
+	return t.text
 }
 
 type query struct {
@@ -83,6 +99,13 @@ func parseQuery(q string) query {
 }
 
 func (t term) fts() string {
+	if len(t.parts) > 0 {
+		ps := make([]string, len(t.parts))
+		for i, p := range t.parts {
+			ps[i] = p.fts()
+		}
+		return "(" + strings.Join(ps, " AND ") + ")"
+	}
 	if len(t.alts) > 0 {
 		alts := make([]string, len(t.alts))
 		for i, a := range t.alts {
@@ -149,10 +172,7 @@ func (ix *Index) search(q string, scope []string, limit int) (searchResponse, er
 	res, err = ix.run(qq, scope, limit)
 	words := make([]string, len(qq.pos))
 	for i, t := range qq.pos {
-		words[i] = t.text
-		if len(t.alts) > 0 {
-			words[i] = t.alts[0]
-		}
+		words[i] = t.display()
 	}
 	return searchResponse{Results: res, Corrected: strings.Join(words, " ")}, err
 }
@@ -277,7 +297,8 @@ func (ix *Index) snippets(match string, results []Result) error {
 
 // correct replaces each word that matches nothing with the closest indexed
 // words. Only runs after a search came back empty, so it costs nothing when
-// the query is fine.
+// the query is fine. A spaceless word ("dynamicarrays", "dynamixarrays") is
+// additionally tried as two words, each allowed its own typo correction.
 func (ix *Index) correct(qq *query) bool {
 	changed := false
 	for i := range qq.pos {
@@ -286,14 +307,64 @@ func (ix *Index) correct(qq *query) bool {
 		if t.phrase || utf8.RuneCountInString(w) < 4 || strings.IndexFunc(w, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) >= 0 {
 			continue // phrases, short words and multi-token words are left alone
 		}
-		if ix.db.QueryRow(`SELECT 1 FROM vocab WHERE term >= ? AND term < ? LIMIT 1`, w, w+"\U0010FFFF").Scan(new(int)) == nil {
+		if ix.hasPrefix(w) {
 			continue // the word itself matches: another word caused the miss
 		}
 		if t.alts = ix.similar(w); len(t.alts) > 0 {
 			changed = true
+			continue
+		}
+		if t.parts = ix.splitCompound(w); len(t.parts) > 0 {
+			changed = true
 		}
 	}
 	return changed
+}
+
+// hasPrefix reports whether any indexed word starts with w.
+func (ix *Index) hasPrefix(w string) bool {
+	return ix.db.QueryRow(`SELECT 1 FROM vocab WHERE term >= ? AND term < ? LIMIT 1`, w, w+"\U0010FFFF").Scan(new(int)) == nil
+}
+
+// resolvePart resolves one half of a spaceless compound: exact prefix match,
+// else typo correction.
+func (ix *Index) resolvePart(p string, exactOnly bool) (term, bool) {
+	if ix.hasPrefix(p) {
+		return term{text: p}, true
+	}
+	if exactOnly {
+		return term{}, false
+	}
+	if alts := ix.similar(p); len(alts) > 0 {
+		return term{text: p, alts: alts}, true
+	}
+	return term{}, false
+}
+
+// splitCompound splits a spaceless word into two indexed words
+// ("dynamicarrays" -> dynamic + arrays), each half exact or typo-corrected
+// ("dynamixarrays" -> dynamic + arrays). Exact splits win over corrected ones
+// so a real word is never shadowed by a nearer typo split.
+func (ix *Index) splitCompound(w string) []term {
+	wr := []rune(w)
+	if len(wr) < 6 {
+		return nil
+	}
+	for _, exactOnly := range []bool{true, false} {
+		for i := 3; i+3 <= len(wr); i++ {
+			a, b := string(wr[:i]), string(wr[i:])
+			ra, oka := ix.resolvePart(a, exactOnly)
+			if !oka {
+				continue
+			}
+			rb, okb := ix.resolvePart(b, exactOnly)
+			if !okb {
+				continue
+			}
+			return []term{ra, rb}
+		}
+	}
+	return nil
 }
 
 // similar returns up to 3 indexed words within edit distance 1 (2 for words

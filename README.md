@@ -48,7 +48,7 @@ for you. Obsidian holds no index at all: the plugin is just a search box.
 |---|---|---|
 | Notes | `.md` | Split at headings: each section is its own result and opens at that line |
 | Images | `.png .jpg .jpeg .webp .heic .gif .tiff .bmp` | Apple Vision OCR |
-| PDFs | `.pdf` | Text layer page by page; scanned pages are OCR'd; optionally text inside figures |
+| PDFs | `.pdf` | Text layer page by page (no OCR; scanned pages with no text contribute no content) |
 | Audio and video | `.m4a .mp3 .wav .aac .flac .aiff .caf .mp4 .mov` | Apple on-device speech-to-text |
 | Office | `.docx .pptx .xlsx .doc .rtf .odt` | Built-in parsers and macOS `textutil` |
 | Web and ebooks | `.html .svg .epub` | Tags stripped |
@@ -163,6 +163,7 @@ Open search with your hotkey, the magnifier icon in the left ribbon, or
 | Type | Finds |
 |---|---|
 | `sched` | Words starting with "sched" |
+| `DynamicArrays` | Spaceless words are split (`dynamic` + `arrays`), each typo-tolerant |
 | `round robin` | Both words, anywhere |
 | `"round robin"` | The exact phrase |
 | `-passing` | Excludes results containing "passing" |
@@ -194,7 +195,6 @@ Combine them: `fcfs in:image path:"Operating System"`.
 |---|---|
 | **Ignored folders** | One folder per line (e.g. `Templates`). Nothing inside is indexed. |
 | **OCR languages** | e.g. `en-US,hi-IN`. Empty means English; `auto` means detect. Changing this re-reads images and recordings. |
-| **OCR figures inside PDFs** | Also read text inside images on PDF pages that already have text. Slower. Changing this re-reads PDFs only. |
 | **Delete search index** | Same as the command. Your notes are never touched. |
 | **Server URL / token** | Use a server on another machine (see [phone setup](#search-from-your-phone-optional)). Leave empty normally. |
 
@@ -241,8 +241,6 @@ Combine them: `fcfs in:image path:"Operating System"`.
   helpers stop after 30 seconds, so the server sits at about 30 MB.
 - **Snippets only for what you see.** Results are ranked first, and the
   highlighted excerpts are built only for the rows that are shown.
-- **Resumable.** Big PDFs are OCR'd 8 pages at a time and saved as they go, so
-  closing Obsidian never loses progress.
 
 **Where the data lives**
 
@@ -269,7 +267,7 @@ Combine them: `fcfs in:image path:"Operating System"`.
 | `server/main.go` | HTTP API, settings, startup |
 | `server/index.go` | SQLite schema, vault scan, change tracking, job queue |
 | `server/query.go` | Query parsing, filters, ranking, typo correction |
-| `server/extract.go` | Reading each file type, OCR and PDF work |
+| `server/extract.go` | Reading each file type, image OCR and PDF text |
 | `server/ask.go` | Ask your vault |
 | `helper/main.swift` | Vision OCR, PDFKit, speech-to-text, on-device LLM |
 

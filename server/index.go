@@ -45,7 +45,7 @@ const chunksDef = `fts5(name, title, body, source UNINDEXED,
 
 const (
 	pageBits      = 20 // ponytail: caps a document at ~1M pages / a note at ~1M lines
-	schemaVersion = 4
+	schemaVersion = 5
 )
 
 type Index struct {
@@ -128,21 +128,36 @@ func openIndex(dbPath, vault string) (*Index, error) {
 	if _, err := db.Exec(`PRAGMA user_version = ` + strconv.Itoa(schemaVersion)); err != nil {
 		return nil, err
 	}
-	// Upgrade: one 'ocr' config ("vision1|lang|figures") became two, so the
-	// pdf-figures setting no longer re-OCRs every image. Carried over as-is.
+	// PDF OCR was removed in v5: PDFs are text layer only. A leftover 'pdf'
+	// config key means old OCR chunks (misreads like "Dynamic Arrays" ->
+	// "Oganic Armys", dropped short pages) that must be re-extracted once.
+	// Any pdf stuck in ocr status is moved back to pending for the same
+	// reason. Both are no-ops on databases that already migrated.
+	if _, err := db.Exec(`UPDATE files SET status = 'pending' WHERE kind = 'pdf' AND status = 'ocr'`); err != nil {
+		return nil, err
+	}
+	var pdfCfg string
+	if db.QueryRow(`SELECT value FROM meta WHERE key = 'pdf'`).Scan(&pdfCfg) == nil {
+		if _, err := db.Exec(`UPDATE files SET status = 'pending' WHERE kind = 'pdf';
+			DELETE FROM meta WHERE key = 'pdf'`); err != nil {
+			return nil, err
+		}
+	}
+	// Upgrade: the legacy single 'ocr' key ("vision1|lang|figures") carried a
+	// pdf-figures flag that no longer exists. Keep its language for images
+	// and audio, drop the flag.
 	var old string
 	if db.QueryRow(`SELECT value FROM meta WHERE key = 'ocr'`).Scan(&old) == nil {
 		if p := strings.Split(old, "|"); len(p) == 3 {
-			db.Exec(`INSERT OR REPLACE INTO meta VALUES ('media', ?), ('pdf', ?)`,
-				p[0]+"|"+normLang(p[1]), p[0]+"|"+normLang(p[1])+"|"+p[2])
+			db.Exec(`INSERT OR REPLACE INTO meta VALUES ('media', ?)`,
+				p[0]+"|"+normLang(p[1]))
 		}
 		db.Exec(`DELETE FROM meta WHERE key = 'ocr'`)
 	}
-	// A different OCR engine or setting redoes only the files it affects. Old
+	// A different OCR engine or language redoes only the files it affects. Old
 	// text stays searchable until each file's new text replaces it.
 	for _, c := range []struct{ key, want, redo string }{
 		{"media", mediaConfig(), `UPDATE files SET status = 'ocr' WHERE kind IN ('image', 'audio')`},
-		{"pdf", pdfConfig(), `UPDATE files SET status = 'pending' WHERE kind = 'pdf'`},
 	} {
 		var have string
 		db.QueryRow(`SELECT value FROM meta WHERE key = ?`, c.key).Scan(&have)
@@ -377,10 +392,9 @@ func nameOf(rel string) string {
 	return strings.TrimSuffix(base, path.Ext(base))
 }
 
-// store writes extracted pages. replaceAll wipes the file's chunks first; the
-// OCR pass on a pdf sets it false so it only replaces the pages it OCR'd.
-// The status only advances if the file hasn't changed since the job was claimed.
-func (ix *Index) store(j job, pages []page, replaceAll bool, status, errMsg string) error {
+// store writes extracted pages, wiping the file's chunks first. The status
+// only advances if the file hasn't changed since the job was claimed.
+func (ix *Index) store(j job, pages []page, status, errMsg string) error {
 	ix.wmu.Lock()
 	defer ix.wmu.Unlock()
 	tx, err := ix.db.Begin()
@@ -394,10 +408,8 @@ func (ix *Index) store(j job, pages []page, replaceAll bool, status, errMsg stri
 		return nil
 	}
 	base := j.id << pageBits
-	if replaceAll {
-		if err := deleteChunks(tx, base, base+1<<pageBits-1); err != nil {
-			return err
-		}
+	if err := deleteChunks(tx, base, base+1<<pageBits-1); err != nil {
+		return err
 	}
 	for _, p := range pages {
 		if p.n >= 1<<pageBits {
@@ -408,11 +420,6 @@ func (ix *Index) store(j job, pages []page, replaceAll bool, status, errMsg stri
 			name = nameOf(j.rel)
 		}
 		rowid := base | int64(p.n)
-		if !replaceAll { // replaceAll already emptied the whole range
-			if err := deleteChunks(tx, rowid, rowid); err != nil {
-				return err
-			}
-		}
 		if _, err := tx.Exec(`INSERT INTO chunks(rowid, name, title, body, source) VALUES(?,?,?,?,?)`,
 			rowid, name, p.title, p.body, p.source); err != nil {
 			return err
@@ -468,7 +475,7 @@ func (ix *Index) release(id int64) {
 func (ix *Index) reset() error {
 	ix.wmu.Lock()
 	_, err := ix.db.Exec(`DELETE FROM chunks; DELETE FROM files; DELETE FROM meta;
-		INSERT INTO meta VALUES ('media', ?), ('pdf', ?)`, mediaConfig(), pdfConfig())
+		INSERT INTO meta VALUES ('media', ?)`, mediaConfig())
 	if err == nil {
 		_, err = ix.db.Exec(`VACUUM`)
 	}

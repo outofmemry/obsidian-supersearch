@@ -14,7 +14,7 @@ import (
 )
 
 // makePDF builds a minimal pdf, one page per text with a real text layer
-// ("" = a blank page, which counts as scanned).
+// ("" = a blank page with no text layer).
 func makePDF(texts ...string) []byte {
 	objs := []string{"<< /Type /Catalog /Pages 2 0 R >>", "", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"}
 	var kids []string
@@ -151,7 +151,7 @@ func TestIndex(t *testing.T) {
 	if left != 0 {
 		t.Errorf("reset left %d rows", left)
 	}
-	ix.store(stale, []page{{source: "text", body: "ghosttext"}}, true, "done", "") // finishes after the reset
+	ix.store(stale, []page{{source: "text", body: "ghosttext"}}, "done", "") // finishes after the reset
 	if got := paths(find(t, ix, "ghosttext")); got != "" {
 		t.Errorf("job that outlived the reset wrote orphan chunks: %s", got)
 	}
@@ -188,8 +188,9 @@ func TestPDFAndOCR(t *testing.T) {
 	vault := t.TempDir()
 	pdf := filepath.Join(vault, "paper.pdf")
 	write(t, pdf, makePDF("Platypus migration report"))
-	// render the pdf to a png (an image containing text), then wrap that png
-	// back into a pdf with no text layer (a "scanned" pdf)
+	// render the pdf to a png (an image containing text): images are OCR'd,
+	// but PDFs are text layer only, so a scanned pdf with no text layer has
+	// no content to index.
 	if out, err := exec.Command("sips", "-s", "format", "png", pdf, "--out", filepath.Join(vault, "shot.png")).CombinedOutput(); err != nil {
 		t.Fatal(err, string(out))
 	}
@@ -221,12 +222,17 @@ func TestPDFAndOCR(t *testing.T) {
 	for _, r := range res {
 		got[r.Path] = fmt.Sprintf("p%d %s", r.Page, r.Source)
 	}
-	want := map[string]string{"paper.pdf": "p1 text", "shot.png": "p0 ocr", "scanned.pdf": "p1 ocr"}
+	want := map[string]string{"paper.pdf": "p1 text", "shot.png": "p0 ocr"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
-	if s, _ := ix.status(); s["counts"].(map[string]int)["done"] != 4 {
-		t.Errorf("status = %v, want 4 done", s)
+	// a short title-only page keeps its exact text layer (no OCR replacement)
+	write(t, filepath.Join(vault, "title.pdf"), makePDF("Data Structures and Algorithms", "Dynamic Arrays"))
+	ix.touch("title.pdf")
+	drain(ix)
+	expect(t, ix, "dynamic arrays", "title.pdf", 2, "text")
+	if s, _ := ix.status(); s["counts"].(map[string]int)["done"] != 5 {
+		t.Errorf("status = %v, want 5 done", s)
 	}
 }
 
@@ -330,6 +336,30 @@ func TestQueryFeatures(t *testing.T) {
 	}
 }
 
+func TestCompoundQuery(t *testing.T) {
+	vault := t.TempDir()
+	ix := newIndex(t, vault, map[string]string{
+		"notes/dsa.md": "# DSA\nDynamic Arrays are contiguous memory.",
+	})
+	if err := ix.scan(true); err != nil {
+		t.Fatal(err)
+	}
+	drain(ix)
+
+	if got := paths(find(t, ix, "DynamicArrays")); got != "notes/dsa.md:0" {
+		t.Errorf("spaceless compound: %s", got)
+	}
+	for _, q := range []string{"DynamixArrays", "DynamicArrais"} { // 1-letter typo per half
+		res, err := ix.search(q, nil, 10)
+		if err != nil || len(res.Results) == 0 || res.Corrected == "" {
+			t.Errorf("compound typo %q: %+v %v", q, res, err)
+		}
+	}
+	if res, _ := ix.search("zzzqqqxxx", nil, 10); len(res.Results) != 0 || res.Corrected != "" {
+		t.Errorf("nonsense compound got corrected: %+v", res)
+	}
+}
+
 func TestOSA(t *testing.T) {
 	for _, c := range []struct {
 		a, b string
@@ -395,9 +425,9 @@ func TestSettingsDontFlipFlop(t *testing.T) {
 	write(t, filepath.Join(vault, "a.png"), []byte("x"))
 	write(t, filepath.Join(vault, "b.pdf"), []byte("x"))
 	settings := filepath.Join(t.TempDir(), "data.json")
-	requeued := func(figures bool) (images, pdfs int) {
+	requeued := func(lang string) (images, pdfs int) {
 		t.Helper()
-		write(t, settings, []byte(fmt.Sprintf(`{"ignore":"Templates\n","ocrLang":"","ocrPdfFigures":%t}`, figures)))
+		write(t, settings, []byte(fmt.Sprintf(`{"ignore":"Templates\n","ocrLang":%q}`, lang)))
 		ignore, err := loadSettings(settings)
 		if err != nil || len(ignore) != 1 || ignore[0] != "Templates" {
 			t.Fatalf("settings: %v %v", ignore, err)
@@ -413,47 +443,26 @@ func TestSettingsDontFlipFlop(t *testing.T) {
 		ix.db.Exec(`UPDATE files SET status = 'done'`) // pretend the workers finished
 		return
 	}
-	requeued(true) // first start: everything is new
-	if i, p := requeued(true); i != 0 || p != 0 {
+	requeued("") // first start: everything is new
+	if i, p := requeued(""); i != 0 || p != 0 {
 		t.Errorf("restart with the same settings requeued %d images, %d pdfs", i, p)
 	}
-	if i, p := requeued(false); i != 0 || p != 1 {
-		t.Errorf("pdf-figures toggle requeued %d images (want 0), %d pdfs (want 1)", i, p)
+	if i, p := requeued("hi-IN"); i != 1 || p != 0 {
+		t.Errorf("ocr-lang change requeued %d images (want 1), %d pdfs (want 0)", i, p)
 	}
-	// the old single 'ocr' key upgrades without redoing anything
+	// the old single 'ocr' key upgrades without redoing images
 	ix, _ := openIndex(dbPath, vault)
 	ix.db.Exec(`DELETE FROM meta; INSERT INTO meta VALUES ('ocr', 'vision1||false')`)
 	ix.db.Close()
-	if i, p := requeued(false); i != 0 || p != 0 {
+	if i, p := requeued(""); i != 0 || p != 0 {
 		t.Errorf("upgrade requeued %d images, %d pdfs", i, p)
 	}
-}
-
-func TestPDFOCRResumes(t *testing.T) {
-	useHelper(t)
-	vault := t.TempDir()
-	ix := newIndex(t, vault, map[string]string{"book.pdf": string(makePDF("", "", ""))}) // 3 scanned pages
-	pdfBatch = 1
-	t.Cleanup(func() { pdfBatch = 8 })
-	ix.scan(true)
-	for ix.processOne("pending", nil) {
-	}
-	ocrPages := func() (n int) {
-		ix.db.QueryRow(`SELECT count(*) FROM chunks WHERE source = 'ocr'`).Scan(&n)
-		return
-	}
-	var status string
-	for want := 1; want <= 3; want++ { // one page per job, each one kept: a restart continues, not restarts
-		if !ix.processOne("ocr", nil) {
-			t.Fatalf("no OCR job for page %d", want)
-		}
-		ix.db.QueryRow(`SELECT status FROM files`).Scan(&status)
-		if got := ocrPages(); got != want {
-			t.Fatalf("after job %d: %d pages OCR'd", want, got)
-		}
-	}
-	if status != "done" || ix.processOne("ocr", nil) {
-		t.Errorf("book not finished after its last batch: status %s", status)
+	// a pre-fix database with pdf OCR chunks re-extracts its pdfs once
+	ix, _ = openIndex(dbPath, vault)
+	ix.db.Exec(`UPDATE files SET status = 'ocr' WHERE kind = 'pdf'; INSERT OR REPLACE INTO meta VALUES ('pdf', 'vision1|en-US|false')`)
+	ix.db.Close()
+	if i, p := requeued(""); i != 0 || p != 1 {
+		t.Errorf("pdf-ocr removal requeued %d images (want 0), %d pdfs (want 1)", i, p)
 	}
 }
 

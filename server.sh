@@ -23,9 +23,24 @@ if [ "${1:-}" = "-q" ]; then
 	exec server/supersearch-server -vault "$VAULT" -query "$2"
 fi
 
+# Auth token comes from .env in the repo root (see .env.example), or from an
+# exported SUPERSEARCH_TOKEN which wins. There is no default: the server
+# rejects every request without the token (401), so starting without one
+# would only look like it works.
+if [ -z "${SUPERSEARCH_TOKEN:-}" ] && [ -f .env ]; then
+	set -a
+	# shellcheck disable=SC1091
+	. ./.env
+	set +a
+fi
+if [ -z "${SUPERSEARCH_TOKEN:-}" ]; then
+	echo "SUPERSEARCH_TOKEN is not set: put it in ./.env (see .env.example) or export it" >&2
+	exit 1
+fi
+export SUPERSEARCH_TOKEN
+
 # The port is random; it's printed as "LISTENING <port>". Then:
 #   curl -H "Authorization: Bearer $SUPERSEARCH_TOKEN" "http://127.0.0.1:<port>/search?q=hello"
-export SUPERSEARCH_TOKEN="${SUPERSEARCH_TOKEN:-dev}"
 echo "vault: $VAULT"
-echo "token: $SUPERSEARCH_TOKEN"
+if [ -f .env ]; then echo "token: loaded from .env"; else echo "token: from environment"; fi
 exec server/supersearch-server -vault "$VAULT" "$@"

@@ -2,4 +2,6 @@ server/supersearch-server
 plugin/node_modules/
 plugin/main.js
 server/supersearch-helper
+server/supersearch-server.pid
+server/supersearch-server.log
 .env

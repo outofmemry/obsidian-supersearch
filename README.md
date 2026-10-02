@@ -336,6 +336,14 @@ make test                      # Go tests, including real OCR, PDF, audio and As
 ./server.sh                    # run the server by hand (the plugin normally does this)
 ```
 
+```bash
+./server.sh -d                 # same, but detached in the background
+```
+
+```bash
+./server.sh -k                 # stop the background server
+```
+
 Don't leave `./server.sh` running while Obsidian is open: two servers on one
 vault do the same work twice.
 

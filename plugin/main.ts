@@ -398,13 +398,21 @@ function embedLine(app: App, note: string, image: string): number | undefined {
 }
 
 // Line of the first highlighted match, searching from the section's first line.
+// OCR text read out of a note's remote images matches words that are not in
+// the note itself, so the search falls through to the first remote image
+// embed: the match is inside one of those images.
 async function matchLine(app: App, r: Result): Promise<number | undefined> {
 	const file = app.vault.getAbstractFileByPath(r.path);
 	if (r.kind !== "text" || !(file instanceof TFile) || file.extension !== "md") return;
 	const hit = r.snippet.match(/\x02([^\x03]*)\x03/)?.[1]?.toLowerCase();
-	if (!hit) return r.line;
 	const lines = (await app.vault.cachedRead(file)).split("\n");
-	for (let i = r.line; i < lines.length; i++) if (lines[i].toLowerCase().includes(hit)) return i;
+	if (hit) {
+		for (let i = r.line; i < lines.length; i++) if (lines[i].toLowerCase().includes(hit)) return i;
+	}
+	if (r.source === "ocr") {
+		const at = lines.findIndex((l) => /!\[[^\]]*\]\(https?:\/\/|<img[^>]+src=["']https?:\/\//i.test(l));
+		if (at >= 0) return at;
+	}
 	return r.line;
 }
 

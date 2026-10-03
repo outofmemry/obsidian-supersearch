@@ -481,15 +481,18 @@ func (ix *Index) cachedRemote(urls []string) map[string]string {
 	return out
 }
 
-// fetchOCR downloads and OCRs every URL, concurrently. One slow or dead link
-// never stalls the rest; failures resolve to "" and are skipped by the caller.
+// fetchOCR downloads and OCRs every URL, concurrently. Downloads run
+// maxRemoteFetch-at-a-time so one slow link never stalls the rest; OCR fans
+// out over a small pool of helpers (the worker's own plus spares) because a
+// single helper answers one request at a time. Failures resolve to "" and
+// are skipped by the caller.
 func (ix *Index) fetchOCR(urls []string, h *helperProc) map[string]string {
 	out := make(map[string]string, len(urls))
 	if len(urls) == 0 {
 		return out
 	}
 	type result struct {
-		url, body string
+		url, tmp string
 	}
 	sem := make(chan struct{}, maxRemoteFetch)
 	res := make(chan result, len(urls))
@@ -505,20 +508,52 @@ func (ix *Index) fetchOCR(urls []string, h *helperProc) map[string]string {
 				res <- result{url: u}
 				return
 			}
-			text, err := ocrFile(tmp, h)
-			os.Remove(tmp)
-			if err != nil {
-				res <- result{url: u}
-				return
-			}
-			res <- result{url: u, body: strings.TrimSpace(text)}
+			res <- result{url: u, tmp: tmp}
 		}(u)
 	}
 	wg.Wait()
 	close(res)
+	files := map[string]string{} // url -> temp file
+	for r := range res {
+		if r.tmp != "" {
+			files[r.url] = r.tmp
+		}
+	}
+	// OCR pool: the worker's helper (model already loaded) plus spares.
+	// Helpers stop themselves after 30 s idle, so this costs nothing
+	// once the backlog drains.
+	pool := []*helperProc{h}
+	for range 3 {
+		pool = append(pool, &helperProc{nice: true})
+	}
+	if h == nil {
+		pool = pool[1:]
+	}
+	type ocrout struct {
+		url, body string
+	}
+	oc := make(chan ocrout, len(files))
+	var owg sync.WaitGroup
+	i := 0
+	for u, tmp := range files {
+		owg.Add(1)
+		go func(u, tmp string, hh *helperProc) {
+			defer owg.Done()
+			text, err := ocrFile(tmp, hh)
+			os.Remove(tmp)
+			if err != nil {
+				oc <- ocrout{url: u}
+				return
+			}
+			oc <- ocrout{url: u, body: strings.TrimSpace(text)}
+		}(u, tmp, pool[i%len(pool)])
+		i++
+	}
+	owg.Wait()
+	close(oc)
 	ix.wmu.Lock()
 	defer ix.wmu.Unlock()
-	for r := range res {
+	for r := range oc {
 		out[r.url] = r.body
 		if r.body != "" {
 			ix.db.Exec(`INSERT OR REPLACE INTO remote_ocr(url, body) VALUES(?, ?)`, r.url, r.body)

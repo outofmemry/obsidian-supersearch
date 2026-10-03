@@ -452,14 +452,13 @@ func (ix *Index) noteRemoteOCR(abs string, h *helperProc) ([]page, error) {
 	for u, body := range ix.fetchOCR(missing, h) {
 		textOf[u] = body
 	}
-	var sb strings.Builder
-	for _, u := range urls { // first-seen order: deterministic text
+	// One ocr chunk per image (page slot 0x40000+i) so the plugin can jump
+	// to the exact embed whose picture the match's text came from. url:i
+	// lives in the title column, which never appears in snippets.
+	for i, u := range urls {
 		if t := strings.TrimSpace(textOf[u]); t != "" {
-			sb.WriteString(t + "\n\n")
+			pages = append(pages, page{n: 0x40000 | i, source: "ocr", body: t, title: fmt.Sprintf("url:%d", i)})
 		}
-	}
-	if s := strings.TrimSpace(sb.String()); s != "" {
-		pages = append(pages, page{source: "ocr", body: s})
 	}
 	return pages, nil
 }

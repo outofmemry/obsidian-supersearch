@@ -11,6 +11,7 @@ interface Result {
 	line: number; // first line of the matching note section
 	source: string;
 	snippet: string; // match wrapped in \x02 … \x03
+	urlIdx?: number; // remote-image hit: index of the embed in the note
 	note?: string; // image hits: the note that embeds the image
 }
 
@@ -379,6 +380,8 @@ async function openResult(app: App, r: Result, newTab: boolean) {
 	await app.workspace.openLinkText(link, "", newTab, line === undefined ? undefined : { eState: { line } });
 	// In editing view, also select the matched words.
 	const hit = r.note ? undefined : r.snippet.match(/\x02([^\x03]*)\x03/)?.[1];
+	// For remote-OCR hits the "match" lives inside the embed line, not as
+	// note text: highlighting it on the embed line is useless but harmless.
 	const view = app.workspace.getActiveViewOfType(MarkdownView);
 	if (hit && line !== undefined && view?.file?.path === r.path && view.getMode() === "source") {
 		const text = view.editor.getLine(line);
@@ -410,6 +413,15 @@ async function matchLine(app: App, r: Result): Promise<number | undefined> {
 		for (let i = r.line; i < lines.length; i++) if (lines[i].toLowerCase().includes(hit)) return i;
 	}
 	if (r.source === "ocr") {
+		// Remote-image hit carries which embed its OCR text belongs to.
+		if (r.urlIdx !== undefined && r.urlIdx >= 0) {
+			let idx = 0;
+			for (let i = 0; i < lines.length; i++) {
+				if (/!\[[^\]]*\]\(https?:\/\/|<img[^>]+src=["']https?:\/\//i.test(lines[i])) {
+					if (idx++ === r.urlIdx) return i;
+				}
+			}
+		}
 		const at = lines.findIndex((l) => /!\[[^\]]*\]\(https?:\/\/|<img[^>]+src=["']https?:\/\//i.test(l));
 		if (at >= 0) return at;
 	}

@@ -243,7 +243,10 @@ func (ix *Index) run(qq query, scope []string, limit int) ([]Result, error) {
 		if err := rows.Scan(&r.rowid, &r.Path, &r.Kind, &r.Page, &r.Source, &r.Score); err != nil {
 			return nil, err
 		}
-		if r.Kind == "text" && r.Page > 0 { // note section: page slot holds start line + 1
+		switch {
+		case r.Source == "ocr" && r.Kind == "text" && r.Page >= 0x40000: // remote-image chunk: page slot holds url index
+			r.Line, r.Page = 0, 0
+		case r.Kind == "text" && r.Page > 0 && r.Page < 0x40000: // note section: page slot holds start line + 1
 			r.Line, r.Page = r.Page-1, 0
 		}
 		if byFile[r.Path] == nil {
@@ -278,7 +281,7 @@ func (ix *Index) snippets(match string, results []Result) error {
 		args = append(args, r.rowid)
 		at[r.rowid] = i
 	}
-	rows, err := ix.db.Query(`SELECT rowid, snippet(chunks, 2, char(2), char(3), '…', 24) FROM chunks
+	rows, err := ix.db.Query(`SELECT rowid, snippet(chunks, 2, char(2), char(3), '…', 24), title FROM chunks
 		WHERE chunks MATCH ? AND +rowid IN (?`+strings.Repeat(",?", len(results)-1)+`)`, args...)
 	if err != nil {
 		return err
@@ -286,13 +289,28 @@ func (ix *Index) snippets(match string, results []Result) error {
 	defer rows.Close()
 	for rows.Next() {
 		var id int64
-		var snippet string
-		if err := rows.Scan(&id, &snippet); err != nil {
+		var snippet, title string
+		if err := rows.Scan(&id, &snippet, &title); err != nil {
 			return err
 		}
-		results[at[id]].Snippet = snippet
+		i := at[id]
+		results[i].Snippet = snippet
+		if strings.HasPrefix(title, "url:") { // remote-image chunk: which embed this comes from
+			results[i].URLIdx = parseURLIdx(title[4:])
+		}
 	}
 	return rows.Err()
+}
+
+func parseURLIdx(s string) int {
+	n := 0
+	for _, c := range []byte(s) {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
 
 // correct replaces each word that matches nothing with the closest indexed

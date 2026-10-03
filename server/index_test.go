@@ -79,11 +79,17 @@ func find(t *testing.T, ix *Index, q string) []Result {
 	return res.Results
 }
 
-func expect(t *testing.T, ix *Index, q, path string, page int, source string) {
+func expect(t *testing.T, ix *Index, q, path string, page int, source string, substrings ...string) {
 	t.Helper()
 	res := find(t, ix, q)
 	if len(res) != 1 || res[0].Path != path || res[0].Page != page || res[0].Source != source {
 		t.Errorf("search %q = %+v, want exactly %s p%d %s", q, res, path, page, source)
+		return
+	}
+	for _, want := range substrings {
+		if !strings.Contains(res[0].Snippet, want) {
+			t.Errorf("search %q snippet = %q, want it to contain %q", q, res[0].Snippet, want)
+		}
 	}
 }
 
@@ -408,6 +414,11 @@ func TestRemoteImageOCR(t *testing.T) {
 	}
 	if got := paths(find(t, ix, "migration")); got != "drive.md:0" {
 		t.Errorf("note text alongside remote images: %s", got)
+	}
+	var titled int
+	ix.db.QueryRow(`SELECT count(*) FROM chunks WHERE source = 'ocr' AND title LIKE 'url:%'`).Scan(&titled)
+	if titled < 2 {
+		t.Errorf("want per-image ocr chunks with url:N titles, got %d", titled)
 	}
 	var cached int
 	ix.db.QueryRow(`SELECT count(*) FROM remote_ocr`).Scan(&cached)

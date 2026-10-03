@@ -80,6 +80,7 @@ type Result struct {
 	Source  string  `json:"source"`
 	Snippet string  `json:"snippet"` // match wrapped in \x02 … \x03
 	Score   float64 `json:"score"`
+	URLIdx  int     `json:"urlIdx,omitempty"` // remote-image hit: index of the embed in the note, -1 when unknown
 	rowid   int64
 }
 
@@ -130,6 +131,22 @@ func openIndex(dbPath, vault string) (*Index, error) {
 	}
 	if _, err := db.Exec(`PRAGMA user_version = ` + strconv.Itoa(schemaVersion)); err != nil {
 		return nil, err
+	}
+	// One-time: remote-image OCR moved from one merged chunk per note to one
+	// chunk per image (page slots 0x40000+i). Re-extract affected notes so a
+	// hit can jump to the exact embed; the URL cache makes this seconds.
+	{
+		var have string
+		db.QueryRow(`SELECT value FROM meta WHERE key = 'remoteChunks'`).Scan(&have)
+		if have == "" {
+			if _, err := db.Exec(`UPDATE files SET status = 'ocr', error = '' WHERE kind = 'text' AND EXISTS (
+				SELECT 1 FROM chunks WHERE chunks.rowid BETWEEN files.id << 20 AND (files.id + 1) << 20 - 1 AND chunks.source = 'ocr')`); err != nil {
+				return nil, err
+			}
+			if _, err := db.Exec(`INSERT OR REPLACE INTO meta VALUES ('remoteChunks', 'v1')`); err != nil {
+				return nil, err
+			}
+		}
 	}
 	// PDF OCR was removed in v5: PDFs are text layer only. A leftover 'pdf'
 	// config key means old OCR chunks (misreads like "Dynamic Arrays" ->
@@ -415,17 +432,29 @@ func (ix *Index) store(j job, pages []page, status, errMsg string) error {
 		return err
 	}
 	// Only one chunk carries the file name, so a name match is one result,
-	// not one per page: the chunk with the smallest n (page 1, or the
-	// remote-OCR chunk at page 0 when a note has one).
-	nameRow := int64(-1)
+	// not one per page: page 1 if the note has one, else the earliest
+	// body page, else the earliest remote-ocr chunk.
+	pageFound := false
+	ocrRow := int64(1 << 62)
 	for _, p := range pages {
-		if p.n <= 1 && (nameRow < 0 || int64(p.n) < nameRow) {
-			nameRow = int64(p.n)
+		switch {
+		case p.n == 1:
+			pageFound = true
+		case p.n > 0 && p.n < 0x40000:
+			pageFound = true
+		case p.n >= 0x40000 && int64(p.n) < ocrRow:
+			ocrRow = int64(p.n)
 		}
 	}
+	nameRow := int64(1) // page 1 is always stored when it exists
+	if !pageFound && ocrRow < 1<<62 {
+		nameRow = ocrRow
+	} else if !pageFound {
+		nameRow = 1
+	}
 	for _, p := range pages {
-		if p.n >= 1<<pageBits {
-			break
+		if p.n < 0 || p.n >= 1<<pageBits {
+			continue
 		}
 		name := ""
 		if int64(p.n) == nameRow {

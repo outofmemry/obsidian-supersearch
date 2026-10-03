@@ -139,23 +139,11 @@ func openIndex(dbPath, vault string) (*Index, error) {
 		var have string
 		db.QueryRow(`SELECT value FROM meta WHERE key = 'remoteChunks'`).Scan(&have)
 		if have == "" {
-			paths := []string{}
-			rows, err := db.Query(`SELECT DISTINCT f.path FROM files f
+			if _, err := db.Exec(`UPDATE files SET status = 'ocr', error = '' WHERE kind = 'text' AND id IN (
+				SELECT f.id FROM files f
 				JOIN chunks c ON c.rowid BETWEEN f.id << 20 AND (f.id + 1) << 20 - 1
-				WHERE c.source = 'ocr' AND f.kind = 'text'`)
-			if err != nil {
+				WHERE c.source = 'ocr')`); err != nil {
 				return nil, err
-			}
-			for rows.Next() {
-				var p string
-				rows.Scan(&p)
-				paths = append(paths, p)
-			}
-			rows.Close()
-			for _, p := range paths {
-				if _, err := db.Exec(`UPDATE files SET status = 'ocr', error = '' WHERE path = ?`, p); err != nil {
-					return nil, err
-				}
 			}
 			if _, err := db.Exec(`INSERT OR REPLACE INTO meta VALUES ('remoteChunks', 'v1')`); err != nil {
 				return nil, err

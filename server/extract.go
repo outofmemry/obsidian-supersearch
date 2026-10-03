@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,6 +47,10 @@ func kindOf(p string) string { return kinds[strings.ToLower(filepath.Ext(p))] }
 
 const (
 	maxText = 16 << 20 // per file / per zip entry; also bounds zip bombs
+
+	maxRemoteImages = 20              // remote images OCR'd per note
+	maxRemoteBytes  = 10 << 20        // per remote image; keeps the vault light, text only
+	remoteTimeout   = 30 * time.Second
 )
 
 // Set by main from the plugin's settings.
@@ -69,7 +74,10 @@ func normLang(l string) string {
 // PDFs always take the text-layer path, even if an old index left them in
 // ocr status: Vision OCR never runs on rendered PDF pages, so a short title
 // page keeps its exact text instead of being replaced by an OCR misread
-// ("Dynamic Arrays" -> "Oganic Armys").
+// ("Dynamic Arrays" -> "Oganic Armys"). Notes with remote images
+// (e.g. Google Drive embeds) take the slow lane so the fetch + OCR never
+// delays a note you just edited; only the OCR text is stored, never the
+// image bytes, so the vault stays light.
 func (ix *Index) processOne(status string, h *helperProc) bool {
 	j, ok := ix.next(status)
 	if !ok {
@@ -79,12 +87,23 @@ func (ix *Index) processOne(status string, h *helperProc) bool {
 	abs := filepath.Join(ix.vault, filepath.FromSlash(j.rel))
 	var pages []page
 	var err error
-	if status == "ocr" && j.kind != "pdf" {
-		pages, err = ocr(abs, j.kind, h)
+	next := "done"
+	if status == "ocr" {
+		switch {
+		case j.kind == "pdf":
+			pages, err = extract(abs, j.kind)
+		case j.kind == "text" && isMarkdown(abs):
+			pages, err = noteRemoteOCR(abs, h)
+		default:
+			pages, err = ocr(abs, j.kind, h)
+		}
 	} else {
 		pages, err = extract(abs, j.kind)
+		if err == nil && j.kind == "text" && isMarkdown(abs) && hasRemoteImages(pages) {
+			next = "ocr" // re-read in the slow lane with the remote OCR text
+		}
 	}
-	next, msg := "done", ""
+	msg := ""
 	if err != nil {
 		next, msg, pages = "error", err.Error(), nil
 		pages = []page{{source: "text"}} // keep the file findable by name even though its content failed
@@ -94,6 +113,14 @@ func (ix *Index) processOne(status string, h *helperProc) bool {
 		time.Sleep(time.Second) // don't spin on a broken db
 	}
 	return true
+}
+
+func isMarkdown(abs string) bool {
+	switch ext := strings.ToLower(filepath.Ext(abs)); ext {
+	case ".md", ".markdown":
+		return true
+	}
+	return false
 }
 
 // worker n processes jobs in status forever. Extra OCR workers (n > 0) only
@@ -310,6 +337,16 @@ func ocr(abs, kind string, h *helperProc) ([]page, error) {
 		return []page{{source: "speech", body: body}}, err
 	}
 	if kind == "image" {
+		body, err := ocrFile(abs, h)
+		return []page{{source: "ocr", body: body}}, err
+	}
+	return nil, fmt.Errorf("no OCR for kind %q", kind)
+}
+
+// ocrFile runs Vision OCR on one local image file. A nil helper falls back
+// to a one-shot helper process.
+func ocrFile(abs string, h *helperProc) (string, error) {
+	if h != nil {
 		// Through the worker's long-running helper: Vision's model stays
 		// loaded, which halves the time and CPU per image vs a process each.
 		var resp struct{ Answer, Error string }
@@ -317,9 +354,105 @@ func ocr(abs, kind string, h *helperProc) ([]page, error) {
 		if err == nil && resp.Error != "" {
 			err = errors.New(resp.Error)
 		}
-		return []page{{source: "ocr", body: resp.Answer}}, err
+		return resp.Answer, err
 	}
-	return nil, fmt.Errorf("no OCR for kind %q", kind)
+	return run(3*time.Minute, helperPath, "ocr", abs, ocrLang)
+}
+
+var (
+	mdImgRe   = regexp.MustCompile(`!\[[^\]]*\]\((https?://[^)\s]+)\)`)
+	htmlImgRe = regexp.MustCompile(`(?i)<img[^>]+src=["'](https?://[^"']+)["']`)
+)
+
+// remoteImageURLs collects the http(s) image URLs embedded in a note's text,
+// deduplicated in first-seen order.
+func remoteImageURLs(text string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range append(mdImgRe.FindAllStringSubmatch(text, -1), htmlImgRe.FindAllStringSubmatch(text, -1)...) {
+		if u := m[1]; !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// hasRemoteImages reports whether extracted note pages reference any remote
+// image, so the note can take the slow lane for fetch + OCR.
+func hasRemoteImages(pages []page) bool {
+	for _, p := range pages {
+		if len(remoteImageURLs(p.title+"\n"+p.body)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+var remoteClient = &http.Client{Timeout: remoteTimeout}
+
+// fetchImage downloads a remote image to a temp file (never into the vault).
+// Links that don't serve image bytes (viewer pages, login walls) are skipped
+// by the caller: use a direct / thumbnail link instead.
+func fetchImage(url string) (string, error) {
+	resp, err := remoteClient.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GET %s: %s", url, resp.Status)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "" && !strings.HasPrefix(ct, "image/") {
+		return "", fmt.Errorf("GET %s: not an image (%s)", url, ct)
+	}
+	f, err := os.CreateTemp("", "ss-remote-*")
+	if err != nil {
+		return "", err
+	}
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxRemoteBytes+1))
+	f.Close()
+	if err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	if n > maxRemoteBytes {
+		os.Remove(f.Name())
+		return "", fmt.Errorf("GET %s: over the %d MB cap", url, maxRemoteBytes>>20)
+	}
+	return f.Name(), nil
+}
+
+// noteRemoteOCR re-extracts a note's sections and appends one OCR chunk with
+// the text read out of its remote images. Failed fetches are skipped: a dead
+// Drive link never fails the note itself.
+func noteRemoteOCR(abs string, h *helperProc) ([]page, error) {
+	b, err := readCapped(abs)
+	if err != nil {
+		return nil, err
+	}
+	pages := markdownSections(string(b))
+	urls := remoteImageURLs(string(b))
+	if len(urls) > maxRemoteImages {
+		urls = urls[:maxRemoteImages]
+	}
+	var sb strings.Builder
+	for _, u := range urls {
+		tmp, err := fetchImage(u)
+		if err != nil {
+			continue
+		}
+		text, err := ocrFile(tmp, h)
+		os.Remove(tmp)
+		if err != nil || strings.TrimSpace(text) == "" {
+			continue
+		}
+		sb.WriteString(strings.TrimSpace(text) + "\n\n")
+	}
+	if s := strings.TrimSpace(sb.String()); s != "" {
+		pages = append(pages, page{source: "ocr", body: s})
+	}
+	return pages, nil
 }
 
 var pdfCache struct { // the last pdf's text, so back-to-back reads reuse it

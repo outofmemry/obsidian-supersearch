@@ -46,7 +46,7 @@ for you. Obsidian holds no index at all: the plugin is just a search box.
 
 | What | Files | How it's read |
 |---|---|---|
-| Notes | `.md` | Split at headings: each section is its own result and opens at that line |
+| Notes | `.md` | Split at headings: each section is its own result and opens at that line; remote `![](https://…)` images are fetched and OCR'd, text only |
 | Images | `.png .jpg .jpeg .webp .heic .gif .tiff .bmp` | Apple Vision OCR |
 | PDFs | `.pdf` | Text layer page by page (no OCR; scanned pages with no text contribute no content) |
 | Audio and video | `.m4a .mp3 .wav .aac .flac .aiff .caf .mp4 .mov` | Apple on-device speech-to-text |
@@ -194,7 +194,7 @@ Combine them: `fcfs in:image path:"Operating System"`.
 | Setting | What it does |
 |---|---|
 | **Ignored folders** | One folder per line (e.g. `Templates`). Nothing inside is indexed. |
-| **OCR languages** | e.g. `en-US,hi-IN`. Empty means English; `auto` means detect. Changing this re-reads images and recordings. |
+| **OCR languages** | e.g. `en-US,hi-IN`. Empty means English; `auto` means detect. Changing this re-reads images and recordings (not remote-image text; it refreshes when its note changes, or after Delete search index). |
 | **Delete search index** | Same as the command. Your notes are never touched. |
 | **Server URL / token** | Use a server on another machine (see [phone setup](#search-from-your-phone-optional)). Leave empty normally. |
 | **Fall back to local server** | Desktop only: when the remote server is unreachable, run the local index instead and switch back automatically. |
@@ -292,6 +292,7 @@ deletes the plugin folder, including the index. Nothing else is left on your Mac
 | Results look wrong or stale | Run **Delete search index**; it rebuilds in a minute or two |
 | "Ask" says Apple Intelligence isn't available | Turn it on in System Settings → Apple Intelligence & Siri |
 | Fan spins during the first index | Normal for a minute or two while images are read. Use **Pause** or run on battery (1 worker). |
+| Drive image text not found | Use a direct image link (`uc?export=view`, `thumbnail`), not the viewer page; the link must serve image bytes without login |
 | Is it still running after quitting? | `pgrep -lf supersearch` prints nothing once Obsidian has quit |
 
 Server errors appear in Obsidian's developer console

@@ -411,12 +411,21 @@ func (ix *Index) store(j job, pages []page, status, errMsg string) error {
 	if err := deleteChunks(tx, base, base+1<<pageBits-1); err != nil {
 		return err
 	}
+	// Only one chunk carries the file name, so a name match is one result,
+	// not one per page: the chunk with the smallest n (page 1, or the
+	// remote-OCR chunk at page 0 when a note has one).
+	nameRow := int64(-1)
+	for _, p := range pages {
+		if p.n <= 1 && (nameRow < 0 || int64(p.n) < nameRow) {
+			nameRow = int64(p.n)
+		}
+	}
 	for _, p := range pages {
 		if p.n >= 1<<pageBits {
 			break
 		}
 		name := ""
-		if p.n <= 1 { // only the first chunk carries the file name, so a name match is one result, not one per page
+		if int64(p.n) == nameRow {
 			name = nameOf(j.rel)
 		}
 		rowid := base | int64(p.n)

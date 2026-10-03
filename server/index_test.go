@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -357,6 +359,59 @@ func TestCompoundQuery(t *testing.T) {
 	}
 	if res, _ := ix.search("zzzqqqxxx", nil, 10); len(res.Results) != 0 || res.Corrected != "" {
 		t.Errorf("nonsense compound got corrected: %+v", res)
+	}
+}
+
+func TestRemoteImageOCR(t *testing.T) {
+	useHelper(t)
+	vault := t.TempDir()
+	// an image containing text, served over http like a Drive direct link
+	pdf := filepath.Join(vault, "src.pdf")
+	write(t, pdf, makePDF("Quokkawallaby remote"))
+	if out, err := exec.Command("sips", "-s", "format", "png", pdf, "--out", filepath.Join(vault, "src.png")).CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	img, err := os.ReadFile(filepath.Join(vault, "src.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(vault, "src.pdf"))
+	os.Remove(filepath.Join(vault, "src.png"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/pic.png" {
+			w.Header().Set("Content-Type", "image/png")
+			w.Write(img)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	write(t, filepath.Join(vault, "drive.md"),
+		[]byte("# Drive\nnotes about the migration\n![pic]("+srv.URL+"/pic.png)\n![dead]("+srv.URL+"/gone.png)"))
+	write(t, filepath.Join(vault, "plain.md"), []byte("just some words"))
+
+	ix, err := openIndex(filepath.Join(t.TempDir(), "index.db"), vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.scan(true); err != nil {
+		t.Fatal(err)
+	}
+	drain(ix)
+
+	expect(t, ix, "quokkawallaby", "drive.md", 0, "ocr") // remote OCR text lives on the host note
+	expect(t, ix, "quokkawallaby in:ocr", "drive.md", 0, "ocr")
+	if got := paths(find(t, ix, "migration")); got != "drive.md:0" {
+		t.Errorf("note text alongside remote images: %s", got)
+	}
+	if s, _ := ix.status(); s["counts"].(map[string]int)["done"] != 2 {
+		t.Errorf("a dead image link must not fail its note: %v", s)
+	}
+	// no image bytes land in the vault: only the two notes exist
+	var names string
+	ix.db.QueryRow(`SELECT group_concat(path, ',') FROM files`).Scan(&names)
+	if names != "drive.md,plain.md" && names != "plain.md,drive.md" {
+		t.Errorf("unexpected files indexed: %s", names)
 	}
 }
 

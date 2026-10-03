@@ -45,7 +45,7 @@ Obsidian plugin (TS)                     supersearch-server (Go, one binary)
 
 | Kind | Files | How |
 |---|---|---|
-| Notes | .md | split at headings: each section is a result that opens at its line; heading + #tags + frontmatter tags rank above body text |
+| Notes | .md | split at headings: each section is a result that opens at its line; heading + #tags + frontmatter tags rank above body text; remote `![](https://…)` images are fetched and OCR'd into the note's rows (text only, vault stays light) |
 | Text / code | .txt .canvas .csv .json .yaml .go .py .ts … | read as-is |
 | PDF | .pdf | PDFKit text per page, no OCR (a scanned page with no text layer contributes no content) |
 | Images | .png .jpg .webp .heic .gif .tiff … | Apple Vision OCR (lines rebuilt in reading order, Cyrillic look-alikes folded, transparency flattened) |
@@ -152,6 +152,7 @@ on a phone, which are type-checked but need a manual look.
 |---|---|---|
 | macOS-only helper | No Windows/Linux | tesseract + poppler fallback behind the same helper commands |
 | PDFs are text layer only | Scanned PDFs with no text layer are not searchable | render pages + Vision OCR behind the same pdftext path |
+| Remote images need public links | Viewer/login-walled URLs serve HTML, not image bytes; md notes only, 20 images/note, 10 MB each | Drive API / auth fetch |
 | No .webm/.ogg audio | Apple's decoder can't read them | ffmpeg conversion step |
 | Typo correction scans vocab words by first letter | First-letter typos not corrected | trigram index over vocab |
 | Remote mode has token auth only | Needs Tailscale/HTTPS in front | built-in TLS |

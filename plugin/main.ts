@@ -241,7 +241,7 @@ export default class Supersearch extends Plugin {
 				for (const [note, dests] of Object.entries(this.app.metadataCache.resolvedLinks))
 					for (const dest in dests) if (!map.has(dest)) map.set(dest, note);
 			}
-			return embeddedIn.get(path);
+			return this.embeddedIn.get(path);
 		};
 		const results: Result[] = [];
 		for (const r of res.results as Result[]) {
@@ -427,6 +427,11 @@ async function matchLine(app: App, r: Result): Promise<number | undefined> {
 				seen.add(u);
 			}
 		}
+	}
+	if (hit && !remote) {
+		for (let i = r.line; i < lines.length; i++) if (lines[i].toLowerCase().includes(hit)) return i;
+	}
+	if (remote) {
 		const at = lines.findIndex((l) => /!\[[^\]]*\]\(https?:\/\/|<img[^>]+src=["']https?:\/\//i.test(l));
 		if (at >= 0) return at;
 	}
@@ -443,11 +448,6 @@ class SearchModal extends SuggestModal<Result> {
 		this.limit = 50;
 		this.setPlaceholder(paths ? "Search this note and its images…" : "Search notes, PDFs, images, docs…  (path: ext: in: -word \"phrase\")");
 		this.emptyStateText = "No matches";
-		this.info = createDiv("supersearch-info");
-		this.modalEl.insertBefore(this.info, this.resultContainerEl);
-	}
-
-	// Requests can resolve out of order while typing fast. Every call returns
 		this.setInstructions([
 			{ command: "↑↓", purpose: "navigate" },
 			{ command: "↵", purpose: "open" },
@@ -455,13 +455,22 @@ class SearchModal extends SuggestModal<Result> {
 			{ command: "esc", purpose: "dismiss" },
 		]);
 		this.modalEl.addClass("supersearch-modal");
+		this.info = createDiv("supersearch-info");
+		this.modalEl.insertBefore(this.info, this.resultContainerEl);
+	}
+
+	// Requests can resolve out of order while typing fast. Every call returns
 	// the newest results known, so an old response can never paint over a newer one.
 	async getSuggestions(query: string): Promise<Result[]> {
 		const n = ++this.seq;
+		// Skip requests superseded while typing: only the last keystroke of a burst hits the server.
+		await new Promise((r) => window.setTimeout(r, 40));
+		if (n !== this.seq) return this.latest;
 		const res = await this.plugin.search(query, this.paths).catch(() => ({ results: [] as Result[], info: "Search server not reachable" }));
 		if (n === this.seq) {
 			this.latest = res.results;
-			this.info.setText(res.info);
+			const count = res.results.length ? `${res.results.length} result${res.results.length === 1 ? "" : "s"}` : "";
+			this.info.setText([count, res.info].filter(Boolean).join(" · "));
 		}
 		return this.latest;
 	}
@@ -491,9 +500,11 @@ class AskModal extends Modal {
 		input.addEventListener("keydown", async (e) => {
 			if (e.key !== "Enter" || !input.value.trim()) return;
 			answer.setText("Thinking…");
+			answer.addClass("is-thinking");
 			sources.empty();
 			try {
 				const res = await this.plugin.api("/ask", { question: input.value });
+				answer.removeClass("is-thinking");
 				answer.setText(res.answer); // plain text: the answer is built from untrusted note content
 				for (const [i, r] of (res.sources as Result[]).entries()) {
 					if (!this.app.vault.getAbstractFileByPath(r.path)) continue;
@@ -506,6 +517,7 @@ class AskModal extends Modal {
 					});
 				}
 			} catch (err) {
+				answer.removeClass("is-thinking");
 				answer.setText("Could not answer: " + ((err as Error).message ?? err));
 			}
 		});
@@ -545,11 +557,15 @@ class SearchView extends ItemView {
 			if (n !== seq) return;
 			info.setText(res.info);
 			list.empty();
+			if (input.value.trim() && !res.results.length) list.createDiv({ cls: "supersearch-empty", text: "No matches" });
+			const frag = document.createDocumentFragment();
 			for (const r of res.results) {
-				const el = list.createDiv("suggestion-item");
+				const el = createDiv("suggestion-item");
 				renderResult(this.app, r, el);
 				el.addEventListener("click", (e) => openResult(this.app, r, Keymap.isModEvent(e) !== false));
+				frag.appendChild(el);
 			}
+			list.appendChild(frag);
 		}, 30, true);
 		input.addEventListener("input", run);
 		input.focus();

@@ -111,6 +111,10 @@ func (ix *Index) processOne(status string, h *helperProc) bool {
 	if err := ix.store(j, pages, next, msg); err != nil {
 		fmt.Fprintln(os.Stderr, "store:", j.rel, err)
 		time.Sleep(time.Second) // don't spin on a broken db
+	} else if next == "ocr" {
+		// A fast-lane job chained into the slow lane: sleeping OCR workers
+		// never see it otherwise (store, unlike apply, wakes nobody).
+		ix.wake()
 	}
 	return true
 }

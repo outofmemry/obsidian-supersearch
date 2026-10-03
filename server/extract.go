@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -48,9 +49,9 @@ func kindOf(p string) string { return kinds[strings.ToLower(filepath.Ext(p))] }
 const (
 	maxText = 16 << 20 // per file / per zip entry; also bounds zip bombs
 
-	maxRemoteImages = 20              // remote images OCR'd per note
-	maxRemoteBytes  = 10 << 20        // per remote image; keeps the vault light, text only
-	maxRemoteFetch  = 8               // concurrent downloads per note; one slow image never stalls the rest
+	maxRemoteImages = 20       // remote images OCR'd per note
+	maxRemoteBytes  = 10 << 20 // per remote image; keeps the vault light, text only
+	maxRemoteFetch  = 8        // concurrent downloads per note; one slow image never stalls the rest
 	remoteTimeout   = 30 * time.Second
 )
 
@@ -370,14 +371,26 @@ var (
 )
 
 // remoteImageURLs collects the http(s) image URLs embedded in a note's text,
-// deduplicated in first-seen order.
+// deduplicated in document order. The plugin recomputes the same order to
+// find the embed a url:i chunk belongs to, so keep the two in step.
 func remoteImageURLs(text string) []string {
+	type hit struct {
+		at int
+		u  string
+	}
+	var hits []hit
+	for _, re := range []*regexp.Regexp{mdImgRe, htmlImgRe} {
+		for _, m := range re.FindAllStringSubmatchIndex(text, -1) {
+			hits = append(hits, hit{m[0], text[m[2]:m[3]]})
+		}
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].at < hits[j].at })
 	var out []string
 	seen := map[string]bool{}
-	for _, m := range append(mdImgRe.FindAllStringSubmatch(text, -1), htmlImgRe.FindAllStringSubmatch(text, -1)...) {
-		if u := m[1]; !seen[u] {
-			seen[u] = true
-			out = append(out, u)
+	for _, h := range hits {
+		if !seen[h.u] {
+			seen[h.u] = true
+			out = append(out, h.u)
 		}
 	}
 	return out

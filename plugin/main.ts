@@ -370,7 +370,7 @@ function renderResult(app: App, r: Result, el: HTMLElement) {
 	// same as a local image hit shown as its host note.
 	const badge =
 		r.source === "ocr" ? (r.note || r.kind === "text" ? "in image" : "OCR " + ext) : r.source === "speech" ? (r.note ? "in recording" : "SPEECH " + ext) : ext;
-	aux.createSpan({ cls: "suggestion-hotkey", text: badge + (r.page > 0 ? " p." + r.page : "") });
+	aux.createSpan({ cls: "suggestion-hotkey supersearch-badge", text: badge + (r.page > 0 ? " p." + r.page : "") });
 }
 
 async function openResult(app: App, r: Result, newTab: boolean) {
@@ -409,17 +409,19 @@ async function matchLine(app: App, r: Result): Promise<number | undefined> {
 	if (r.kind !== "text" || !(file instanceof TFile) || file.extension !== "md") return;
 	const hit = r.snippet.match(/\x02([^\x03]*)\x03/)?.[1]?.toLowerCase();
 	const lines = (await app.vault.cachedRead(file)).split("\n");
-	if (hit) {
-		for (let i = r.line; i < lines.length; i++) if (lines[i].toLowerCase().includes(hit)) return i;
-	}
-	if (r.source === "ocr") {
-		// Remote-image hit carries which embed its OCR text belongs to.
-		if (r.urlIdx !== undefined && r.urlIdx >= 0) {
-			let idx = 0;
-			for (let i = 0; i < lines.length; i++) {
-				if (/!\[[^\]]*\]\(https?:\/\/|<img[^>]+src=["']https?:\/\//i.test(lines[i])) {
-					if (idx++ === r.urlIdx) return i;
-				}
+	const remote = r.source === "ocr";
+	if (remote && r.urlIdx !== undefined && r.urlIdx >= 0) {
+		// Remote-image hit: the words live in the picture, not the note text,
+		// so go straight to the embed it came from. Same order as the server's
+		// remoteImageURLs: document order, duplicate URLs counted once.
+		const re = /!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)|<img[^>]+src=["'](https?:\/\/[^"']+)["']/gi;
+		const seen = new Set<string>();
+		for (let i = 0; i < lines.length; i++) {
+			for (const m of lines[i].matchAll(re)) {
+				const u = m[1] ?? m[2];
+				if (seen.has(u)) continue;
+				if (seen.size === r.urlIdx) return i;
+				seen.add(u);
 			}
 		}
 		const at = lines.findIndex((l) => /!\[[^\]]*\]\(https?:\/\/|<img[^>]+src=["']https?:\/\//i.test(l));

@@ -365,8 +365,10 @@ function renderResult(app: App, r: Result, el: HTMLElement) {
 	if (r.kind === "image" && file instanceof TFile)
 		aux.createEl("img", { cls: "supersearch-thumb", attr: { src: app.vault.getResourcePath(file), loading: "lazy" } });
 	const ext = r.path.slice(r.path.lastIndexOf(".") + 1).toUpperCase();
+	// OCR text found in a note's remote images reads as the note itself,
+	// same as a local image hit shown as its host note.
 	const badge =
-		r.source === "ocr" ? (r.note ? "in image" : "OCR " + ext) : r.source === "speech" ? (r.note ? "in recording" : "SPEECH " + ext) : ext;
+		r.source === "ocr" ? (r.note || r.kind === "text" ? "in image" : "OCR " + ext) : r.source === "speech" ? (r.note ? "in recording" : "SPEECH " + ext) : ext;
 	aux.createSpan({ cls: "suggestion-hotkey", text: badge + (r.page > 0 ? " p." + r.page : "") });
 }
 

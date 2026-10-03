@@ -54,6 +54,7 @@ export default class Supersearch extends Plugin {
 		this.addSettingTab(new SettingsTab(this));
 		this.registerView(VIEW, (leaf) => new SearchView(leaf, this));
 		this.startServer();
+		this.registerEvent(this.app.metadataCache.on("resolved", () => (this.embeddedIn = undefined)));
 
 		this.addCommand({ id: "search", name: "Search everything", callback: () => new SearchModal(this).open() });
 		this.addCommand({
@@ -223,6 +224,9 @@ export default class Supersearch extends Plugin {
 		return res.status === 204 ? null : res.json;
 	}
 
+	// attachment → host note, rebuilt lazily after the vault's links change.
+	private embeddedIn?: Map<string, string>;
+
 	// search returns display-ready results plus a one-line note for the UI.
 	async search(q: string, scope?: string[]): Promise<{ results: Result[]; info: string }> {
 		if (!q.trim()) return { results: [], info: "" };
@@ -231,12 +235,11 @@ export default class Supersearch extends Plugin {
 		const res = await this.api(url);
 		// attachment → first note that embeds it. Built only when a result needs
 		// it: walking every link in the vault on each keystroke adds up on big vaults.
-		let embeddedIn: Map<string, string> | undefined;
 		const hostOf = (path: string) => {
-			if (!embeddedIn) {
-				embeddedIn = new Map();
+			if (!this.embeddedIn) {
+				const map = (this.embeddedIn = new Map<string, string>());
 				for (const [note, dests] of Object.entries(this.app.metadataCache.resolvedLinks))
-					for (const dest in dests) if (!embeddedIn.has(dest)) embeddedIn.set(dest, note);
+					for (const dest in dests) if (!map.has(dest)) map.set(dest, note);
 			}
 			return embeddedIn.get(path);
 		};
@@ -445,6 +448,13 @@ class SearchModal extends SuggestModal<Result> {
 	}
 
 	// Requests can resolve out of order while typing fast. Every call returns
+		this.setInstructions([
+			{ command: "↑↓", purpose: "navigate" },
+			{ command: "↵", purpose: "open" },
+			{ command: "ctrl/cmd ↵", purpose: "open in new tab" },
+			{ command: "esc", purpose: "dismiss" },
+		]);
+		this.modalEl.addClass("supersearch-modal");
 	// the newest results known, so an old response can never paint over a newer one.
 	async getSuggestions(query: string): Promise<Result[]> {
 		const n = ++this.seq;

@@ -50,6 +50,7 @@ const (
 
 	maxRemoteImages = 20              // remote images OCR'd per note
 	maxRemoteBytes  = 10 << 20        // per remote image; keeps the vault light, text only
+	maxRemoteFetch  = 8               // concurrent downloads per note; one slow image never stalls the rest
 	remoteTimeout   = 30 * time.Second
 )
 
@@ -93,7 +94,7 @@ func (ix *Index) processOne(status string, h *helperProc) bool {
 		case j.kind == "pdf":
 			pages, err = extract(abs, j.kind)
 		case j.kind == "text" && isMarkdown(abs):
-			pages, err = noteRemoteOCR(abs, h)
+			pages, err = ix.noteRemoteOCR(abs, h)
 		default:
 			pages, err = ocr(abs, j.kind, h)
 		}
@@ -429,8 +430,9 @@ func fetchImage(url string) (string, error) {
 
 // noteRemoteOCR re-extracts a note's sections and appends one OCR chunk with
 // the text read out of its remote images. Failed fetches are skipped: a dead
-// Drive link never fails the note itself.
-func noteRemoteOCR(abs string, h *helperProc) ([]page, error) {
+// Drive link never fails the note itself. OCR text is cached by URL, so an
+// edited note only pays for images it hasn't seen before.
+func (ix *Index) noteRemoteOCR(abs string, h *helperProc) ([]page, error) {
 	b, err := readCapped(abs)
 	if err != nil {
 		return nil, err
@@ -440,23 +442,89 @@ func noteRemoteOCR(abs string, h *helperProc) ([]page, error) {
 	if len(urls) > maxRemoteImages {
 		urls = urls[:maxRemoteImages]
 	}
-	var sb strings.Builder
+	textOf := ix.cachedRemote(urls)
+	var missing []string
 	for _, u := range urls {
-		tmp, err := fetchImage(u)
-		if err != nil {
-			continue
+		if _, ok := textOf[u]; !ok {
+			missing = append(missing, u)
 		}
-		text, err := ocrFile(tmp, h)
-		os.Remove(tmp)
-		if err != nil || strings.TrimSpace(text) == "" {
-			continue
+	}
+	for u, body := range ix.fetchOCR(missing, h) {
+		textOf[u] = body
+	}
+	var sb strings.Builder
+	for _, u := range urls { // first-seen order: deterministic text
+		if t := strings.TrimSpace(textOf[u]); t != "" {
+			sb.WriteString(t + "\n\n")
 		}
-		sb.WriteString(strings.TrimSpace(text) + "\n\n")
 	}
 	if s := strings.TrimSpace(sb.String()); s != "" {
 		pages = append(pages, page{source: "ocr", body: s})
 	}
 	return pages, nil
+}
+
+// cachedRemote returns the OCR text already stored for each URL.
+func (ix *Index) cachedRemote(urls []string) map[string]string {
+	out := map[string]string{}
+	if len(urls) == 0 {
+		return out
+	}
+	ix.wmu.Lock()
+	defer ix.wmu.Unlock()
+	for _, u := range urls {
+		var body string
+		if ix.db.QueryRow(`SELECT body FROM remote_ocr WHERE url = ?`, u).Scan(&body) == nil {
+			out[u] = body
+		}
+	}
+	return out
+}
+
+// fetchOCR downloads and OCRs every URL, concurrently. One slow or dead link
+// never stalls the rest; failures resolve to "" and are skipped by the caller.
+func (ix *Index) fetchOCR(urls []string, h *helperProc) map[string]string {
+	out := make(map[string]string, len(urls))
+	if len(urls) == 0 {
+		return out
+	}
+	type result struct {
+		url, body string
+	}
+	sem := make(chan struct{}, maxRemoteFetch)
+	res := make(chan result, len(urls))
+	var wg sync.WaitGroup
+	for _, u := range urls {
+		wg.Add(1)
+		go func(u string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			tmp, err := fetchImage(u)
+			if err != nil {
+				res <- result{url: u}
+				return
+			}
+			text, err := ocrFile(tmp, h)
+			os.Remove(tmp)
+			if err != nil {
+				res <- result{url: u}
+				return
+			}
+			res <- result{url: u, body: strings.TrimSpace(text)}
+		}(u)
+	}
+	wg.Wait()
+	close(res)
+	ix.wmu.Lock()
+	defer ix.wmu.Unlock()
+	for r := range res {
+		out[r.url] = r.body
+		if r.body != "" {
+			ix.db.Exec(`INSERT OR REPLACE INTO remote_ocr(url, body) VALUES(?, ?)`, r.url, r.body)
+		}
+	}
+	return out
 }
 
 var pdfCache struct { // the last pdf's text, so back-to-back reads reuse it

@@ -389,6 +389,7 @@ func TestRemoteImageOCR(t *testing.T) {
 	write(t, filepath.Join(vault, "drive.md"),
 		[]byte("# Drive\nnotes about the migration\n![pic]("+srv.URL+"/pic.png)\n![dead]("+srv.URL+"/gone.png)"))
 	write(t, filepath.Join(vault, "plain.md"), []byte("just some words"))
+	write(t, filepath.Join(vault, "again.md"), []byte("# Again\nsame picture ![pic]("+srv.URL+"/pic.png)"))
 
 	ix, err := openIndex(filepath.Join(t.TempDir(), "index.db"), vault)
 	if err != nil {
@@ -399,19 +400,30 @@ func TestRemoteImageOCR(t *testing.T) {
 	}
 	drain(ix)
 
-	expect(t, ix, "quokkawallaby", "drive.md", 0, "ocr") // remote OCR text lives on the host note
-	expect(t, ix, "quokkawallaby in:ocr", "drive.md", 0, "ocr")
+	if got := paths(find(t, ix, "quokkawallaby")); got != "again.md:0 drive.md:0" && got != "drive.md:0 again.md:0" {
+		t.Errorf("remote OCR text on both host notes: %s", got)
+	}
+	if got := paths(find(t, ix, "quokkawallaby in:ocr")); got != "again.md:0 drive.md:0" && got != "drive.md:0 again.md:0" {
+		t.Errorf("remote OCR in:ocr on both host notes: %s", got)
+	}
 	if got := paths(find(t, ix, "migration")); got != "drive.md:0" {
 		t.Errorf("note text alongside remote images: %s", got)
 	}
-	if s, _ := ix.status(); s["counts"].(map[string]int)["done"] != 2 {
+	var cached int
+	ix.db.QueryRow(`SELECT count(*) FROM remote_ocr`).Scan(&cached)
+	if cached != 1 {
+		t.Errorf("remote_ocr has %d rows, want 1 (one good URL, the dead link is never stored)", cached)
+	}
+	if s, _ := ix.status(); s["counts"].(map[string]int)["done"] != 3 {
 		t.Errorf("a dead image link must not fail its note: %v", s)
 	}
-	// no image bytes land in the vault: only the two notes exist
+	// no image bytes land in the vault: only the three notes exist
 	var names string
 	ix.db.QueryRow(`SELECT group_concat(path, ',') FROM files`).Scan(&names)
-	if names != "drive.md,plain.md" && names != "plain.md,drive.md" {
-		t.Errorf("unexpected files indexed: %s", names)
+	for _, want := range []string{"drive.md", "plain.md", "again.md"} {
+		if !strings.Contains(names, want) {
+			t.Errorf("note missing from index: %s (have %s)", want, names)
+		}
 	}
 }
 

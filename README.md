@@ -46,7 +46,7 @@ for you. Obsidian holds no index at all: the plugin is just a search box.
 
 | What | Files | How it's read |
 |---|---|---|
-| Notes | `.md` | Split at headings: each section is its own result and opens at that line; remote `![](https://…)` images are fetched and OCR'd, text only |
+| Notes | `.md` | Split at headings: each section is its own result and opens at that line; remote `![](https://…)` images are fetched (8 at a time) and OCR'd, text cached by URL so edits only pay for new images |
 | Images | `.png .jpg .jpeg .webp .heic .gif .tiff .bmp` | Apple Vision OCR |
 | PDFs | `.pdf` | Text layer page by page (no OCR; scanned pages with no text contribute no content) |
 | Audio and video | `.m4a .mp3 .wav .aac .flac .aiff .caf .mp4 .mov` | Apple on-device speech-to-text |

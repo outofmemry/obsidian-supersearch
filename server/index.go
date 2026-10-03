@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS files_status ON files(status);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- OCR text of remote (http) images embedded in notes, keyed by URL: an
+-- edited note only re-pays for images it hasn't seen. Bytes never stored.
+CREATE TABLE IF NOT EXISTS remote_ocr (url TEXT PRIMARY KEY, body TEXT NOT NULL);
 -- One row per note section (page = start line + 1), pdf page (page = 1..n),
 -- or whole file (page 0). rowid = file_id<<20 | page, so a file's chunks are
 -- one cheap rowid range.

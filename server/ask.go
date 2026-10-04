@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,8 +12,9 @@ import (
 	"time"
 )
 
-// "Ask your vault": the best keyword hits go to Apple's on-device language
-// model (through `supersearch-helper serve`) as numbered sources it cites.
+// "Ask your vault": the best keyword hits go to a local language model as
+// numbered sources it cites: Apple's on-device model on macOS (through
+// `supersearch-helper serve`), Ollama elsewhere (see askModel in backend_*.go).
 
 const (
 	askSources   = 6
@@ -66,10 +68,7 @@ func (h *helperProc) call(req, resp any, timeout time.Duration) error {
 		h.idle = time.AfterFunc(h.idleLimit(), h.stopIdle)
 	}()
 	if h.cmd == nil {
-		cmd := exec.Command(helperPath, "serve")
-		if h.nice {
-			cmd = exec.Command("nice", "-n", "15", helperPath, "serve")
-		}
+		cmd := command(context.Background(), h.nice, helperPath, "serve")
 		in, err := cmd.StdinPipe()
 		if err != nil {
 			return err
@@ -145,15 +144,8 @@ func (ix *Index) ask(question string, scope []string) (askResponse, error) {
 		fmt.Fprintf(&sb, "[%d] (%s)\n%s\n\n", i+1, loc, strings.TrimSpace(body))
 	}
 	sb.WriteString("Question: " + question)
-	var resp struct{ Answer, Error string }
-	err = ix.ah.call(map[string]any{
-		"op": "ask",
-		"instructions": "You answer questions using only the numbered notes you are given. " +
-			"Cite the notes you used like [1] or [2]. Be concise. If the notes do not contain the answer, say so in one sentence.",
-		"prompt": sb.String(),
-	}, &resp, 2*time.Minute)
-	if err == nil && resp.Error != "" {
-		err = fmt.Errorf("%s", resp.Error)
-	}
-	return askResponse{Answer: resp.Answer, Sources: sources}, err
+	answer, err := askModel(ix, "You answer questions using only the numbered notes you are given. "+
+		"Cite the notes you used like [1] or [2]. Be concise. If the notes do not contain the answer, say so in one sentence.",
+		sb.String())
+	return askResponse{Answer: answer, Sources: sources}, err
 }

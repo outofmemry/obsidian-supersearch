@@ -5,12 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -57,12 +55,13 @@ const (
 
 // Set by main from the plugin's settings.
 var (
-	helperPath = "supersearch-helper" // Apple Vision + PDFKit, see helper/main.swift
+	helperPath = "supersearch-helper" // macOS only: Apple Vision + PDFKit, see helper/main.swift
 	ocrLang    = ""                   // comma-separated BCP-47, "" = en-US
 )
 
 // mediaConfig covers images and audio (the only kinds that use OCR/speech).
-func mediaConfig() string { return "vision1|" + normLang(ocrLang) }
+// The engine is part of it: text read by another OCR engine is redone.
+func mediaConfig() string { return mediaEngine + "|" + normLang(ocrLang) }
 
 func normLang(l string) string {
 	if l = strings.ReplaceAll(l, " ", ""); l == "" {
@@ -153,13 +152,13 @@ var battery struct {
 	checked time.Time
 }
 
-// onBattery reports whether the Mac runs on battery, checked at most once a minute.
+// onBattery reports whether the computer runs on battery, checked at most
+// once a minute (batteryNow is per OS, see power_*.go).
 func onBattery() bool {
 	battery.Lock()
 	defer battery.Unlock()
 	if time.Since(battery.checked) > time.Minute {
-		out, _ := exec.Command("pmset", "-g", "batt").Output()
-		battery.on, battery.checked = bytes.Contains(out, []byte("Battery Power")), time.Now()
+		battery.on, battery.checked = batteryNow(), time.Now()
 	}
 	return battery.on
 }
@@ -199,7 +198,7 @@ func extract(abs, kind string) (pages []page, err error) {
 			return strings.HasSuffix(n, ".xhtml") || strings.HasSuffix(n, ".html") || strings.HasSuffix(n, ".htm")
 		}))
 	case "textutil":
-		return one(run(time.Minute, "textutil", "-convert", "txt", "-stdout", abs))
+		return one(legacyText(abs))
 	case "pdf":
 		return pdfText(abs)
 	}
@@ -339,7 +338,7 @@ func xmlText(r io.Reader, sb *strings.Builder) {
 // ocr is the slow second pass for images and audio.
 func ocr(abs, kind string, h *helperProc) ([]page, error) {
 	if kind == "audio" {
-		body, err := run(30*time.Minute, "nice", "-n", "15", helperPath, "transcribe", abs, ocrLang)
+		body, err := transcribe(abs)
 		return []page{{source: "speech", body: body}}, err
 	}
 	if kind == "image" {
@@ -349,21 +348,8 @@ func ocr(abs, kind string, h *helperProc) ([]page, error) {
 	return nil, fmt.Errorf("no OCR for kind %q", kind)
 }
 
-// ocrFile runs Vision OCR on one local image file. A nil helper falls back
-// to a one-shot helper process.
-func ocrFile(abs string, h *helperProc) (string, error) {
-	if h != nil {
-		// Through the worker's long-running helper: Vision's model stays
-		// loaded, which halves the time and CPU per image vs a process each.
-		var resp struct{ Answer, Error string }
-		err := h.call(map[string]any{"op": "ocr", "path": abs, "langs": ocrLang}, &resp, 3*time.Minute)
-		if err == nil && resp.Error != "" {
-			err = errors.New(resp.Error)
-		}
-		return resp.Answer, err
-	}
-	return run(3*time.Minute, helperPath, "ocr", abs, ocrLang)
-}
+// ocrFile reads the text in one local image file (backend_*.go).
+func ocrFile(abs string, h *helperProc) (string, error) { return ocrImage(abs, h) }
 
 var (
 	mdImgRe   = regexp.MustCompile(`!\[[^\]]*\]\((https?://[^)\s]+)\)`)
@@ -590,7 +576,7 @@ func pdfPages(abs string) ([]string, error) {
 	if pdfCache.key == key {
 		return pdfCache.texts, nil
 	}
-	out, err := run(time.Minute, helperPath, "pdftext", abs)
+	out, err := pdfRaw(abs)
 	if err != nil {
 		return nil, err
 	}
@@ -599,9 +585,18 @@ func pdfPages(abs string) ([]string, error) {
 }
 
 func run(timeout time.Duration, name string, args ...string) (string, error) {
+	return runCmd(timeout, false, name, args...)
+}
+
+// runLow runs a background tool at low CPU priority.
+func runLow(timeout time.Duration, name string, args ...string) (string, error) {
+	return runCmd(timeout, true, name, args...)
+}
+
+func runCmd(timeout time.Duration, low bool, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := command(ctx, low, name, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -613,11 +608,4 @@ func run(timeout time.Duration, name string, args ...string) (string, error) {
 		return "", fmt.Errorf("%s: %w %s", filepath.Base(name), err, msg)
 	}
 	return string(out), nil
-}
-
-func missingTools() []string {
-	if _, err := os.Stat(helperPath); err != nil {
-		return []string{"supersearch-helper"}
-	}
-	return []string{}
 }

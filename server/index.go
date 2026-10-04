@@ -12,11 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-
-	// The C library through cgo: measured 2.3× faster than the pure-Go port on
-	// every query, and a smaller binary. Needs a C compiler (the Xcode tools the
-	// Swift helper needs anyway) and the sqlite_fts5 build tag.
-	_ "github.com/mattn/go-sqlite3"
 )
 
 const schema = `
@@ -88,9 +83,7 @@ func openIndex(dbPath, vault string) (*Index, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, err
 	}
-	dsn := "file:" + (&url.URL{Path: dbPath}).EscapedPath() +
-		"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000"
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open(sqlDriver, sqlDSN(dbPath))
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +186,16 @@ func openIndex(dbPath, vault string) (*Index, error) {
 		}
 	}
 	return &Index{db: db, vault: vault, ah: &helperProc{}}, nil
+}
+
+// uriPath turns a file path into the path part of an SQLite file: URI.
+// Windows drive paths become /C:/…, which SQLite reads back as C:\….
+func uriPath(p string) string {
+	p = filepath.ToSlash(p)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return (&url.URL{Path: p}).EscapedPath()
 }
 
 func (ix *Index) wake() {
@@ -548,5 +551,5 @@ func (ix *Index) status() (map[string]any, error) {
 		rows.Scan(&s, &n)
 		counts[s] = n
 	}
-	return map[string]any{"counts": counts, "paused": ix.paused.Load(), "missing": missingTools()}, rows.Err()
+	return map[string]any{"counts": counts, "paused": ix.paused.Load(), "missing": ix.missingTools()}, rows.Err()
 }

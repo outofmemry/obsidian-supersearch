@@ -132,16 +132,17 @@ export default class Supersearch extends Plugin {
 		const { existsSync } = require("fs") as typeof import("fs");
 		const { join } = require("path") as typeof import("path");
 		const vault = (this.app.vault.adapter as any).getBasePath() as string;
-		const bin = join(vault, this.manifest.dir!, "supersearch-server");
+		const bin = join(vault, this.manifest.dir!, process.platform === "win32" ? "supersearch-server.exe" : "supersearch-server");
 		if (!existsSync(bin)) {
-			new Notice("Supersearch: server binary not found in the plugin folder. Run ./install.sh.", 10000);
+			new Notice("Supersearch: server binary not found in the plugin folder. Run the installer (install.sh, or install.ps1 on Windows).", 10000);
 			return false;
 		}
 		this.token = Array.from(crypto.getRandomValues(new Uint8Array(24)), (b) => b.toString(16).padStart(2, "0")).join("");
 		// The server reads OCR settings and ignored folders from this plugin's data.json itself.
 		const args = ["-vault", vault, "-exit-on-stdin-close"];
 		// stdin stays open as a lifeline: if Obsidian dies, the pipe closes and the server exits.
-		const server = spawn(bin, args, { env: { ...process.env, SUPERSEARCH_TOKEN: this.token }, stdio: ["pipe", "pipe", "pipe"] });
+		// windowsHide: no console window for the server on Windows.
+		const server = spawn(bin, args, { env: { ...process.env, SUPERSEARCH_TOKEN: this.token }, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 		this.server = server;
 		this.base = new Promise((resolve) => {
 			let out = "";
@@ -342,7 +343,7 @@ export default class Supersearch extends Plugin {
 		bar.setText(!left ? "" : s.paused ? `Supersearch: paused, ${left} left` : `Supersearch: indexing, ${left} left`);
 		if (s.missing.length && !this.warnedMissing) {
 			this.warnedMissing = true;
-			new Notice("Supersearch: supersearch-helper is missing, so PDFs and images can't be read. Re-run ./install.sh.", 15000);
+			new Notice(`Supersearch: some files can't be read until these are installed: ${s.missing.join(", ")}. See the README, or re-run the installer.`, 15000);
 		}
 	}
 }
@@ -484,7 +485,8 @@ class SearchModal extends SuggestModal<Result> {
 	}
 }
 
-// Ask a question; Apple's on-device model answers from your notes and cites them.
+// Ask a question; a local model (Apple's on-device one on macOS, Ollama
+// elsewhere) answers from your notes and cites them.
 class AskModal extends Modal {
 	constructor(private plugin: Supersearch) {
 		super(plugin.app);

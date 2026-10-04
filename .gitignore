@@ -5,3 +5,4 @@ server/supersearch-helper
 server/supersearch-server.pid
 server/supersearch-server.log
 .env
+dist/

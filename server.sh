@@ -55,9 +55,7 @@ DEFAULT_VAULT="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Notes"
 VAULT="${VAULT_ARG:-${VAULT:-$DEFAULT_VAULT}}"
 [ -d "$VAULT" ] || { echo "vault not found: $VAULT" >&2; exit 1; }
 
-./build-helper.sh
-# sqlite_fts5: full-text search in the C SQLite driver. Stripped: a third smaller.
-(cd server && CGO_ENABLED=1 go build -tags sqlite_fts5 -trimpath -ldflags="-s -w" -o supersearch-server .)
+./build.sh
 
 if [ -n "$QUERY" ]; then
 	# shellcheck disable=SC2086

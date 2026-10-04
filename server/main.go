@@ -19,6 +19,9 @@ import (
 )
 
 func main() {
+	if cliMode() {
+		os.Exit(cli(os.Args[1:]))
+	}
 	vault := flag.String("vault", "", "absolute path of the Obsidian vault")
 	dbPath := flag.String("db", "", "index file (default <vault>/.obsidian/plugins/supersearch/index.nosync/index.db)")
 	query := flag.String("query", "", "index text files, run one search, print it and exit (no server, no OCR)")
@@ -32,27 +35,13 @@ func main() {
 	if *vault == "" {
 		log.Fatal("-vault is required")
 	}
-	pluginDir := filepath.Join(*vault, ".obsidian", "plugins", "supersearch")
 	if *dbPath == "" {
-		*dbPath = filepath.Join(pluginDir, "index.nosync", "index.db")
+		*dbPath = filepath.Join(pluginDir(*vault), "index.nosync", "index.db")
 	}
-	// Settings come from the plugin's own settings file, never from flags, so
-	// every server on this vault (the plugin's, ./server.sh, a remote one on
-	// the synced vault) agrees. Two servers with different OCR settings used
-	// to make each other re-OCR every image on every start.
-	ignore, err := loadSettings(filepath.Join(pluginDir, "data.json"))
-	if err != nil {
-		log.Fatal("settings: ", err)
-	}
-	if exe, err := os.Executable(); err == nil {
-		helperPath = filepath.Join(filepath.Dir(exe), "supersearch-helper")
-	}
-
-	ix, err := openIndex(*dbPath, *vault)
+	ix, err := openVault(*vault, *dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	ix.ignore = ignore
 
 	if *query != "" {
 		runQuery(ix, *query)
@@ -80,10 +69,50 @@ func main() {
 			os.Exit(0)
 		}()
 	}
+	ln, err := net.Listen("tcp", *listen)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("LISTENING %d\n", ln.Addr().(*net.TCPAddr).Port)
+	log.Fatal(serve(ix, ln, *ocrWorkers, token))
+}
 
+func pluginDir(vault string) string {
+	return filepath.Join(vault, ".obsidian", "plugins", "supersearch")
+}
+
+// openVault opens the index for a vault with the plugin's settings applied.
+func openVault(vault, dbPath string) (*Index, error) {
+	// Settings come from the plugin's own settings file, never from flags, so
+	// every server on this vault (the plugin's, ./server.sh, the supersearch
+	// CLI, a remote one on the synced vault) agrees. Two servers with
+	// different OCR settings used to make each other re-OCR every image on
+	// every start.
+	ignore, err := loadSettings(filepath.Join(pluginDir(vault), "data.json"))
+	if err != nil {
+		return nil, fmt.Errorf("settings: %w", err)
+	}
+	// The helper sits next to the real binary, also when started through a
+	// symlink (the CLI in ~/.local/bin).
+	if exe, err := os.Executable(); err == nil {
+		if real, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = real
+		}
+		helperPath = filepath.Join(filepath.Dir(exe), "supersearch-helper")
+	}
+	ix, err := openIndex(dbPath, vault)
+	if err != nil {
+		return nil, err
+	}
+	ix.ignore = ignore
+	return ix, nil
+}
+
+// serve starts the workers and the periodic scan, then answers HTTP on ln.
+func serve(ix *Index, ln net.Listener, ocrWorkers int, token string) error {
 	// One fast worker for text/pdf/office, N slow ones for OCR, so a big OCR
 	// backlog never delays a note you just edited.
-	for n := range *ocrWorkers + 1 {
+	for n := range ocrWorkers + 1 {
 		wake := make(chan struct{}, 1)
 		ix.wakes = append(ix.wakes, wake)
 		if n == 0 {
@@ -104,12 +133,7 @@ func main() {
 		}
 	}()
 
-	ln, err := net.Listen("tcp", *listen)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("LISTENING %d\n", ln.Addr().(*net.TCPAddr).Port)
-	log.Fatal(http.Serve(ln, handler(ix, token)))
+	return http.Serve(ln, handler(ix, token))
 }
 
 func handler(ix *Index, token string) http.Handler {

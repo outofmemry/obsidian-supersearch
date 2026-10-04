@@ -181,14 +181,41 @@ func TestIndex(t *testing.T) {
 }
 
 // useHelper points extraction at the Swift helper built next to the tests
-// (install.sh / make test build it).
+// (install.sh / make test build it). The portable backend needs its tools
+// instead (tesseract, pdftotext).
 func useHelper(t *testing.T) {
 	t.Helper()
+	if !appleBackend {
+		for _, tool := range []string{"tesseract", "pdftotext"} {
+			if findTool(tool) == "" {
+				t.Skip(tool + " not installed")
+			}
+		}
+		return
+	}
 	abs, _ := filepath.Abs("supersearch-helper")
 	if _, err := os.Stat(abs); err != nil {
 		t.Skip("supersearch-helper not built")
 	}
 	helperPath = abs
+}
+
+// pdfToPNG renders a pdf's first page to an image containing its text:
+// sips on macOS, pdftoppm (poppler) elsewhere.
+func pdfToPNG(t *testing.T, pdf, png string) {
+	t.Helper()
+	var out []byte
+	var err error
+	if _, e := exec.LookPath("sips"); e == nil {
+		out, err = exec.Command("sips", "-s", "format", "png", pdf, "--out", png).CombinedOutput()
+	} else if tool := findTool("pdftoppm"); tool != "" {
+		out, err = exec.Command(tool, "-png", "-r", "150", "-singlefile", pdf, strings.TrimSuffix(png, ".png")).CombinedOutput()
+	} else {
+		t.Skip("no sips or pdftoppm to render a test image")
+	}
+	if err != nil {
+		t.Fatal(err, string(out))
+	}
 }
 
 func TestPDFAndOCR(t *testing.T) {
@@ -199,11 +226,13 @@ func TestPDFAndOCR(t *testing.T) {
 	// render the pdf to a png (an image containing text): images are OCR'd,
 	// but PDFs are text layer only, so a scanned pdf with no text layer has
 	// no content to index.
-	if out, err := exec.Command("sips", "-s", "format", "png", pdf, "--out", filepath.Join(vault, "shot.png")).CombinedOutput(); err != nil {
-		t.Fatal(err, string(out))
-	}
-	if out, err := exec.Command("sips", "-s", "format", "pdf", filepath.Join(vault, "shot.png"), "--out", filepath.Join(vault, "scanned.pdf")).CombinedOutput(); err != nil {
-		t.Fatal(err, string(out))
+	pdfToPNG(t, pdf, filepath.Join(vault, "shot.png"))
+	if _, err := exec.LookPath("sips"); err == nil {
+		if out, err := exec.Command("sips", "-s", "format", "pdf", filepath.Join(vault, "shot.png"), "--out", filepath.Join(vault, "scanned.pdf")).CombinedOutput(); err != nil {
+			t.Fatal(err, string(out))
+		}
+	} else {
+		write(t, filepath.Join(vault, "scanned.pdf"), makePDF("")) // no text layer, like a scan
 	}
 
 	ix, err := openIndex(filepath.Join(t.TempDir(), "index.db"), vault)
@@ -374,9 +403,7 @@ func TestRemoteImageOCR(t *testing.T) {
 	// an image containing text, served over http like a Drive direct link
 	pdf := filepath.Join(vault, "src.pdf")
 	write(t, pdf, makePDF("Quokkawallaby remote"))
-	if out, err := exec.Command("sips", "-s", "format", "png", pdf, "--out", filepath.Join(vault, "src.png")).CombinedOutput(); err != nil {
-		t.Fatal(err, string(out))
-	}
+	pdfToPNG(t, pdf, filepath.Join(vault, "src.png"))
 	img, err := os.ReadFile(filepath.Join(vault, "src.png"))
 	if err != nil {
 		t.Fatal(err)
@@ -455,8 +482,22 @@ func TestAskAndAudio(t *testing.T) {
 	useHelper(t)
 	vault := t.TempDir()
 	ix := newIndex(t, vault, map[string]string{"os/fcfs.md": fcfsNote, "misc/css.md": "# Flexbox\njustify-content centers items."})
-	if out, err := exec.Command("say", "-o", filepath.Join(vault, "memo.m4a"), "--data-format=aac", "the round robin scheduler uses a time quantum").CombinedOutput(); err != nil {
-		t.Fatal(err, string(out))
+	if msg := audioMissing(); msg != "" {
+		t.Skip("missing " + msg)
+	}
+	if _, err := exec.LookPath("say"); err == nil {
+		if out, err := exec.Command("say", "-o", filepath.Join(vault, "memo.m4a"), "--data-format=aac", "the round robin scheduler uses a time quantum").CombinedOutput(); err != nil {
+			t.Fatal(err, string(out))
+		}
+	} else if speech := os.Getenv("SUPERSEARCH_TEST_SPEECH"); speech != "" {
+		// a recording of the same sentence, e.g. made with espeak-ng + ffmpeg
+		b, err := os.ReadFile(speech)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(vault, "memo.m4a"), b)
+	} else {
+		t.Skip("no say, and SUPERSEARCH_TEST_SPEECH is unset")
 	}
 	ix.scan(true)
 	drain(ix)
@@ -530,7 +571,7 @@ func TestSettingsDontFlipFlop(t *testing.T) {
 	}
 	// the old single 'ocr' key upgrades without redoing images
 	ix, _ := openIndex(dbPath, vault)
-	ix.db.Exec(`DELETE FROM meta; INSERT INTO meta VALUES ('ocr', 'vision1||false')`)
+	ix.db.Exec(`DELETE FROM meta; INSERT INTO meta VALUES ('ocr', ?)`, mediaEngine+"||false")
 	ix.db.Close()
 	if i, p := requeued(""); i != 0 || p != 0 {
 		t.Errorf("upgrade requeued %d images, %d pdfs", i, p)
@@ -545,6 +586,9 @@ func TestSettingsDontFlipFlop(t *testing.T) {
 }
 
 func TestHelperStopsWhenIdle(t *testing.T) {
+	if !appleBackend {
+		t.Skip("the portable backend runs no helper")
+	}
 	useHelper(t)
 	h := &helperProc{idleAfter: 200 * time.Millisecond}
 	ask := func() {

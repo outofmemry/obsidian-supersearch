@@ -11,19 +11,25 @@ all of that work into a small local server that the plugin starts and stops
 for you. Obsidian holds no index at all: the plugin is just a search box.
 
 - Results in **under 1 ms for specific searches and about 5 ms for the broadest ones** (tested on a vault with 469 notes, 1,763 images and a 265-page PDF)
-- Reads text inside images with **Apple's built-in OCR**, about 24 images per second on an M2
-- Runs **100% on your Mac**: no cloud, no accounts, nothing uploaded
+- Reads text inside images: **Apple's built-in OCR** on a Mac (about 24 images per second on an M2), **Tesseract** on Windows and Linux
+- Runs **100% on your own computer**: no cloud, no accounts, nothing uploaded
+- **iPhone, iPad and Android** search the same index through the `supersearch` command running on one of your computers
 
-> [!IMPORTANT]
-> **macOS only (Apple silicon, macOS 26+). There is no Windows or Linux version.**
->
-> Supersearch reads images with **Apple's Vision framework** instead of
-> Tesseract, the open-source OCR engine most tools use. Vision is built into
-> macOS, so there's nothing to install, and it's both more accurate and faster.
-> On a real vault it read slide tables that Tesseract garbled, at about twice
-> Tesseract's speed. PDFs (PDFKit), audio transcription (SpeechAnalyzer) and
-> Ask your vault (Apple's on-device language model) also use Apple frameworks
-> that only exist on macOS.
+**Where it runs**
+
+| Platform | How | Image OCR · PDFs · audio · Ask |
+|---|---|---|
+| **macOS 26+, Apple silicon** | Plugin starts its own server | Apple Vision · PDFKit · Apple speech · Apple Intelligence (nothing to install) |
+| **Windows 10/11** | Plugin starts its own server | Tesseract · Poppler · whisper.cpp · Ollama |
+| **Linux** | Plugin starts its own server | Tesseract · Poppler · whisper.cpp · Ollama |
+| Older or Intel Macs | Plugin starts its own server | Same as Linux (via Homebrew) |
+| **iPhone, iPad, Android** | Plugin connects to a computer running `supersearch` | Whatever that computer has |
+
+On a Mac, Apple's frameworks are more accurate and faster than the open-source
+tools (Vision read slide tables that Tesseract garbled, at about twice the speed),
+and nothing extra is installed. Everywhere else the installer sets up the
+open-source tools for you. Each one is optional: without it, only its own file
+types go unread, and notes, Office files, ebooks and code are always searched.
 
 ---
 
@@ -35,7 +41,7 @@ for you. Obsidian holds no index at all: the plugin is just a search box.
 - [Settings](#settings)
 - [Architecture](#architecture)
 - [Updating, uninstalling and troubleshooting](#updating-uninstalling-and-troubleshooting)
-- [Search from your phone (optional)](#search-from-your-phone-optional)
+- [The supersearch command (phones, tablets, other computers)](#the-supersearch-command-phones-tablets-other-computers)
 - [Development](#development)
 
 ---
@@ -47,10 +53,10 @@ for you. Obsidian holds no index at all: the plugin is just a search box.
 | What | Files | How it's read |
 |---|---|---|
 | Notes | `.md` | Split at headings: each section is its own result and opens at that line; remote `![](https://…)` images are fetched (8 at a time) and OCR'd, text cached by URL so edits only pay for new images |
-| Images | `.png .jpg .jpeg .webp .heic .gif .tiff .bmp` | Apple Vision OCR |
-| PDFs | `.pdf` | Text layer page by page (no OCR; scanned pages with no text contribute no content) |
-| Audio and video | `.m4a .mp3 .wav .aac .flac .aiff .caf .mp4 .mov` | Apple on-device speech-to-text |
-| Office | `.docx .pptx .xlsx .doc .rtf .odt` | Built-in parsers and macOS `textutil` |
+| Images | `.png .jpg .jpeg .webp .heic .gif .tiff .bmp` | OCR: Apple Vision on macOS, Tesseract elsewhere (HEIC needs `heif-convert` there) |
+| PDFs | `.pdf` | Text layer page by page: PDFKit on macOS, Poppler's `pdftotext` elsewhere (no OCR; scanned pages with no text contribute no content) |
+| Audio and video | `.m4a .mp3 .wav .aac .flac .aiff .caf .mp4 .mov` | On-device speech-to-text: Apple's on macOS, whisper.cpp elsewhere |
+| Office | `.docx .pptx .xlsx .doc .rtf .odt` | Built-in parsers; `.doc` uses macOS `textutil`, or `antiword` elsewhere |
 | Web and ebooks | `.html .svg .epub` | Tags stripped |
 | Text and code | `.txt .canvas .csv .json .yaml .go .py .ts .js …` | As is |
 
@@ -66,40 +72,18 @@ for you. Obsidian holds no index at all: the plugin is just a search box.
 
 **More**
 
-- **Ask your vault**: ask a question and get an answer written from your own notes, with clickable sources, using Apple's on-device language model
+- **Ask your vault**: ask a question and get an answer written from your own notes, with clickable sources, using a local language model (Apple's on-device one on macOS, [Ollama](https://ollama.com) on Windows and Linux)
 - **Search in current note**, including the images inside it
 - **Sidebar panel**: results stay visible while you click through them
 - **Always up to date**: new, edited, renamed and deleted files are picked up within about a second. Nothing ever needs a manual reindex.
-- **Light on your Mac**: background OCR runs at low priority, uses 3 workers when plugged in and 1 on battery, and can be paused
+- **Light on your computer**: background OCR runs at low priority, uses 3 workers when plugged in and 1 on battery, and can be paused
 
 ---
 
 ## Installation
 
-### Requirements
-
-Supersearch runs **only on macOS**; see the note at the top for why.
-
-| | Version | Check with |
-|---|---|---|
-| macOS | **26 (Tahoe) or later**, Apple silicon | `sw_vers` |
-| Xcode Command Line Tools (Swift and C compilers) | current | `swiftc --version` |
-| Go | 1.27 or later | `go version` |
-| Node.js and npm | 18 or later | `node --version` |
-| Obsidian | 1.4 or later | |
-
-"Ask your vault" also needs **Apple Intelligence** turned on (System Settings →
-Apple Intelligence & Siri). Everything else works without it.
-
-Install anything that's missing:
-
-```bash
-xcode-select --install
-```
-
-```bash
-brew install go node
-```
+You need **Obsidian 1.4+**, **Git**, and nothing else up front: the installer
+checks for everything it needs and offers to install what's missing.
 
 ### 1. Get the code
 
@@ -111,20 +95,54 @@ git clone <this-repo-url> supersearch
 cd supersearch
 ```
 
-### 2. Build and install into your vault
+### 2. Run the installer
 
-Pass the path of your vault (the folder that contains `.obsidian`):
+**macOS and Linux**
 
 ```bash
-./install.sh "/path/to/your/vault"
+./install.sh
 ```
 
-This builds three pieces and copies them into
-`<vault>/.obsidian/plugins/supersearch/`:
+**Windows** (in PowerShell, from the `supersearch` folder)
 
-- `supersearch-helper`: the Swift OCR, PDF, speech and AI helper. The first build takes about 40 seconds.
-- `supersearch-server`: the Go search server
-- `main.js`, `manifest.json`, `styles.css`: the Obsidian plugin
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+The installer walks through five steps:
+
+1. **Your vault.** It lists the vaults Obsidian knows about; pick one by number
+   or type a path (the folder that contains `.obsidian`). You can also pass it
+   directly: `./install.sh "/path/to/vault"` or `install.ps1 -Vault "C:\path\to\vault"`.
+2. **Your system.** macOS 26+ on Apple silicon uses Apple's frameworks; Windows,
+   Linux and older Macs use the open-source tools.
+3. **Requirements.** It checks each tool and offers to install the missing ones
+   with your package manager (Homebrew, apt, dnf, pacman, zypper, apk, or winget
+   on Windows). It asks before installing anything.
+4. **The plugin.** It builds the server and the plugin and copies them into
+   `<vault>/.obsidian/plugins/supersearch/`.
+5. **The `supersearch` command.** It installs the CLI (see
+   [below](#the-supersearch-command-phones-tablets-other-computers)) to
+   `~/.local/bin` (on Windows, `%LOCALAPPDATA%\Programs\supersearch`, added to your PATH).
+
+Add `-y` (`-Yes` on Windows) to accept every default without questions.
+
+**What gets checked**
+
+| Tool | Needed for | macOS 26+ | Windows / Linux / older Macs |
+|---|---|---|---|
+| Go 1.21+ | building the server | required | required |
+| Node.js 18+ and npm | building the plugin | required | required |
+| Xcode Command Line Tools | Apple OCR, PDF, speech, AI | required | n/a |
+| Tesseract | text in images | built in | recommended |
+| Poppler (`pdftotext`) | PDFs | built in | recommended |
+| whisper.cpp + ffmpeg + a speech model (142 MB) | audio recordings | built in | optional; the installer offers it |
+| `antiword` | old `.doc` files | built in | optional |
+| A C compiler | about 2× faster index queries | built in | optional (a pure-Go SQLite is used without one) |
+| [Ollama](https://ollama.com) with a model (`ollama pull llama3.2`) | Ask your vault | Apple Intelligence instead | optional |
+
+On macOS, "Ask your vault" needs **Apple Intelligence** turned on (System
+Settings → Apple Intelligence & Siri). Everything else works without it.
 
 > An iCloud vault lives at
 > `~/Library/Mobile Documents/com~apple~CloudDocs/<VaultName>`.
@@ -156,7 +174,8 @@ In **Settings → Hotkeys**, search for "Supersearch" and set:
 
 Open search with your hotkey, the magnifier icon in the left ribbon, or
 <kbd>Cmd</kbd>+<kbd>P</kbd> → "Supersearch: Search everything". Press
-<kbd>Enter</kbd> to open a result, or <kbd>Cmd</kbd>+<kbd>Enter</kbd> to open it in a new tab.
+<kbd>Enter</kbd> to open a result, or <kbd>Cmd</kbd>+<kbd>Enter</kbd> to open it in a new tab
+(<kbd>Ctrl</kbd> instead of <kbd>Cmd</kbd> on Windows and Linux).
 
 ### Search syntax
 
@@ -196,7 +215,7 @@ Combine them: `fcfs in:image path:"Operating System"`.
 | **Ignored folders** | One folder per line (e.g. `Templates`). Nothing inside is indexed. |
 | **OCR languages** | e.g. `en-US,hi-IN`. Empty means English; `auto` means detect. Changing this re-reads images and recordings (not remote-image text; it refreshes when its note changes, or after Delete search index). |
 | **Delete search index** | Same as the command. Your notes are never touched. |
-| **Server URL / token** | Use a server on another machine (see [phone setup](#search-from-your-phone-optional)). Leave empty normally. |
+| **Server URL / token** | Use a server started with the `supersearch` command (see [below](#the-supersearch-command-phones-tablets-other-computers)). Leave empty normally. |
 | **Fall back to local server** | Desktop only: when the remote server is unreachable, run the local index instead and switch back automatically. |
 
 ---
@@ -221,11 +240,17 @@ Combine them: `fcfs in:image path:"Operating System"`.
  └────────────┬────────────────────────────────────────┘
               │ long-running child processes
  ┌────────────▼────────────────────────────────────────┐
- │  supersearch-helper (Swift, macOS frameworks)       │
- │  Vision (OCR) · PDFKit · SpeechAnalyzer             │
- │  (speech-to-text) · FoundationModels (Ask)          │
+ │  macOS: supersearch-helper (Swift)                  │
+ │    Vision (OCR) · PDFKit · SpeechAnalyzer           │
+ │    (speech-to-text) · FoundationModels (Ask)        │
+ │  Windows / Linux: tesseract · pdftotext ·           │
+ │    whisper-cli + ffmpeg · Ollama (Ask)              │
  └─────────────────────────────────────────────────────┘
 ```
+
+The same Go server runs on every platform; only the bottom layer differs
+(`server/backend_apple.go` vs `server/backend_portable.go`). Builds without a C
+compiler (typical on Windows) use a pure-Go SQLite instead of the C one.
 
 **Why it stays fast**
 
@@ -237,9 +262,9 @@ Combine them: `fcfs in:image path:"Operating System"`.
   repeated unless the file changes.
 - **Edits jump the queue.** Notes have their own lane, so a big OCR backlog
   never delays a note you just changed.
-- **Models stay loaded while there's work.** OCR keeps Vision's model in a
-  long-running helper, about 2× faster than starting a process per image. Idle
-  helpers stop after 30 seconds, so the server sits at about 30 MB.
+- **Models stay loaded while there's work.** On macOS, OCR keeps Vision's model
+  in a long-running helper, about 2× faster than starting a process per image.
+  Idle helpers stop after 30 seconds, so the server sits at about 30 MB.
 - **Snippets only for what you see.** Results are ranked first, and the
   highlighted excerpts are built only for the rows that are shown.
 
@@ -256,7 +281,7 @@ Combine them: `fcfs in:image path:"Operating System"`.
 
 - The plugin starts the server when Obsidian opens and stops it when Obsidian
   closes. If Obsidian crashes, the server and helpers notice and exit on their own.
-- The server only listens on `127.0.0.1` (your own Mac), on a random port, and
+- The server only listens on `127.0.0.1` (your own computer), on a random port, and
   every request needs a secret token that is generated at each start.
 - Paths sent to the server are checked, so it can't read outside the vault.
 
@@ -269,55 +294,103 @@ Combine them: `fcfs in:image path:"Operating System"`.
 | `server/index.go` | SQLite schema, vault scan, change tracking, job queue |
 | `server/query.go` | Query parsing, filters, ranking, typo correction |
 | `server/extract.go` | Reading each file type, image OCR and PDF text |
+| `server/backend_apple.go` | macOS: OCR, PDF, speech and Ask through the Swift helper |
+| `server/backend_portable.go` | Windows/Linux: tesseract, pdftotext, whisper.cpp, Ollama |
+| `server/cli.go` | The `supersearch` command |
 | `server/ask.go` | Ask your vault |
 | `helper/main.swift` | Vision OCR, PDFKit, speech-to-text, on-device LLM |
+| `install.sh`, `install.ps1`, `build.sh` | Installers (macOS/Linux, Windows) and the build |
 
 ---
 
 ## Updating, uninstalling and troubleshooting
 
-**Update**: pull the latest code, run `./install.sh "/path/to/your/vault"`
-again, then switch Supersearch off and on in Community plugins.
+**Update**: pull the latest code, run the installer again, then switch
+Supersearch off and on in Community plugins.
 
 **Uninstall**: Settings → Community plugins → Supersearch → uninstall. That
-deletes the plugin folder, including the index. Nothing else is left on your Mac.
+deletes the plugin folder, including the index. To remove the CLI too, delete
+`~/.local/bin/supersearch`, `~/.local/share/supersearch` and
+`~/.config/supersearch` (on Windows: `%LOCALAPPDATA%\Programs\supersearch` and
+`%USERPROFILE%\.config\supersearch`).
 
 **Troubleshooting**
 
 | Problem | Try |
 |---|---|
 | "server binary not found" | Run `./install.sh` with the right vault path |
-| "supersearch-helper is missing" | Re-run `./install.sh`; check `swiftc --version` works |
+| "supersearch-helper is missing" (macOS) | Re-run `./install.sh`; check `swiftc --version` works |
+| "some files can't be read until these are installed: tesseract …" | Install the named tools (re-run the installer), then restart Obsidian so it sees them |
+| Windows: tools installed but still "missing" | Restart Obsidian: it only sees PATH changes made before it started |
+| Linux: Obsidian installed as a Flatpak | Its sandbox can't see tesseract and friends. Run `supersearch` and set the plugin's Server URL to `http://127.0.0.1:54999` with the token it prints |
+| Images in another language aren't read (Windows/Linux) | Install that Tesseract language (e.g. `tesseract-ocr-hin`, `tesseract-langpack-hin`) and set **OCR languages** to `en-US,hi-IN` |
+| "Ask is not available" (Windows/Linux) | Install [Ollama](https://ollama.com), then `ollama pull llama3.2`. Another model: set `SUPERSEARCH_OLLAMA_MODEL` |
 | No results right after installing | Wait for the status bar to clear, then search again |
 | Results look wrong or stale | Run **Delete search index**; it rebuilds in a minute or two |
 | "Ask" says Apple Intelligence isn't available | Turn it on in System Settings → Apple Intelligence & Siri |
 | Fan spins during the first index | Normal for a minute or two while images are read. Use **Pause** or run on battery (1 worker). |
 | Drive image text not found | Use a direct image link (`uc?export=view`, `thumbnail`), not the viewer page; the link must serve image bytes without login |
-| Is it still running after quitting? | `pgrep -lf supersearch` prints nothing once Obsidian has quit |
+| Is it still running after quitting? | `pgrep -lf supersearch` (Windows: `tasklist \| findstr supersearch`) prints nothing once Obsidian has quit |
 
 Server errors appear in Obsidian's developer console
-(<kbd>Cmd</kbd>+<kbd>Option</kbd>+<kbd>I</kbd>), prefixed with `supersearch-server:`.
+(<kbd>Cmd</kbd>+<kbd>Option</kbd>+<kbd>I</kbd>, or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd>), prefixed with `supersearch-server:`.
 
 ---
 
-## Search from your phone (optional)
+## The supersearch command (phones, tablets, other computers)
 
-The plugin also loads on Obsidian mobile, but a phone can't run the server.
-Instead, run the server on a Mac that stays on and has the same vault (for
-example through iCloud), and connect to it over [Tailscale](https://tailscale.com)
-so the connection is private and encrypted:
-
-```bash
-SUPERSEARCH_TOKEN="choose-a-long-random-secret" ./server/supersearch-server -vault "/path/to/vault" -listen 127.0.0.1:8765
-```
+Obsidian on iPhone, iPad and Android can't run the server, so the plugin there
+connects to one running on a computer you own that has the same vault (synced
+with iCloud, Obsidian Sync, Syncthing or anything else). The installer puts a
+`supersearch` command on that computer for this:
 
 ```bash
-tailscale serve --bg 8765
+supersearch
 ```
 
-Then on your phone, in **Settings → Supersearch**, set **Server URL** to
-`https://<your-mac>.<your-tailnet>.ts.net` and **Server token** to your secret.
-The server rescans every minute, so changes synced from other devices show up.
+```
+Supersearch is running
+
+  Vault   /Users/me/Notes
+  URL     http://127.0.0.1:54999
+  Token   3f9c…e81a
+  Index   ~/.config/supersearch/vaults/Notes-1a2b3c4d
+```
+
+- The **token** is generated once and saved in `~/.config/supersearch/token`:
+  every run prints the same one. `supersearch token -new` replaces it.
+- The **index** lives in `~/.config/supersearch`, separate from the plugin's own,
+  and survives restarts. The vault is remembered, so later runs are just `supersearch`.
+- It rescans every minute, so changes synced from other devices show up.
+
+Other commands:
+
+| Command | What it does |
+|---|---|
+| `supersearch /path/to/vault` | Serve another vault (remembered from then on) |
+| `supersearch -lan` | Listen on your home network too, and print those URLs |
+| `supersearch -listen 127.0.0.1:8765` | Another port |
+| `supersearch status` | Indexing progress of the running server |
+| `supersearch search fcfs in:image` | Search from the terminal |
+| `supersearch token` | Print the token |
+| `supersearch vault` | Print (or, with a path, set) the default vault |
+
+**Connect a phone or tablet.** The safest way is [Tailscale](https://tailscale.com)
+(private and encrypted, works away from home). With Tailscale on both devices:
+
+```bash
+tailscale serve --bg 54999
+```
+
+Then in Obsidian on the phone, open **Settings → Supersearch**, set **Server URL**
+to `https://<your-computer>.<your-tailnet>.ts.net` (the `supersearch` banner
+prints it when Tailscale is running), and paste the token into **Server token**.
+On your home Wi-Fi only, `supersearch -lan` and its `http://192.168…:54999` URL
+also work.
+
+**Use it on the same computer.** Desktop Obsidian can use the CLI's server
+instead of starting its own: set **Server URL** to `http://127.0.0.1:54999`.
+That's also the fix for Flatpak installs of Obsidian on Linux.
 
 > Don't expose the port to the internet: the token is the only protection.
 
@@ -327,6 +400,14 @@ The server rescans every minute, so changes synced from other devices show up.
 
 ```bash
 make test                      # Go tests, including real OCR, PDF, audio and Ask
+```
+
+```bash
+make test-portable             # the Windows/Linux backend and pure-Go SQLite, run on this machine
+```
+
+```bash
+make cross                     # server binaries for Linux, Windows and Intel Macs into dist/
 ```
 
 ```bash

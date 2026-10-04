@@ -340,7 +340,11 @@ export default class Supersearch extends Plugin {
 	private applyStatus(s: any, bar: HTMLElement) {
 		this.paused = s.paused;
 		const left = (this.left = s.counts.pending + s.counts.ocr);
-		bar.setText(!left ? "" : s.paused ? `Supersearch: paused, ${left} left` : `Supersearch: indexing, ${left} left`);
+		// A note's remote images are one file in the queue but each is its own
+		// download + OCR, so they get their own count. Older servers omit it.
+		const remote: number = s.remote ?? 0;
+		const work = `${left} left` + (remote ? ` · ${remote} remote image${remote === 1 ? "" : "s"}` : "");
+		bar.setText(!left ? "" : s.paused ? `Supersearch: paused, ${work}` : `Supersearch: indexing, ${work}`);
 		if (s.missing.length && !this.warnedMissing) {
 			this.warnedMissing = true;
 			new Notice(`Supersearch: some files can't be read until these are installed: ${s.missing.join(", ")}. See the README, or re-run the installer.`, 15000);

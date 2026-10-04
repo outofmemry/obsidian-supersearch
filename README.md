@@ -52,7 +52,7 @@ types go unread, and notes, Office files, ebooks and code are always searched.
 
 | What | Files | How it's read |
 |---|---|---|
-| Notes | `.md` | Split at headings: each section is its own result and opens at that line; remote `![](https://…)` images are fetched (8 at a time) and OCR'd, text cached by URL so edits only pay for new images |
+| Notes | `.md` | Split at headings: each section is its own result and opens at that line; remote `![](https://…)` images are fetched (up to 32 at once, across notes) and each is OCR'd as soon as it arrives, text cached by URL so edits only pay for new images |
 | Images | `.png .jpg .jpeg .webp .heic .gif .tiff .bmp` | OCR: Apple Vision on macOS, Tesseract elsewhere (HEIC needs `heif-convert` there) |
 | PDFs | `.pdf` | Text layer page by page: PDFKit on macOS, Poppler's `pdftotext` elsewhere (no OCR; scanned pages with no text contribute no content) |
 | Audio and video | `.m4a .mp3 .wav .aac .flac .aiff .caf .mp4 .mov` | On-device speech-to-text: Apple's on macOS, whisper.cpp elsewhere |
@@ -158,7 +158,9 @@ Settings → Apple Intelligence & Siri). Everything else works without it.
 
 That's it. The search server starts by itself. Your notes are searchable within
 seconds, and images, PDFs and recordings are read in the background. The status
-bar shows `Supersearch: indexing, N left` until everything is done (a vault
+bar shows `Supersearch: indexing, N left` until everything is done, plus
+`· M remote images` while images embedded from the web are still being
+downloaded and read (a vault
 with about 1,800 images takes about 1–2 minutes when plugged in).
 
 ### 4. Add hotkeys (recommended)

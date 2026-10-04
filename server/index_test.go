@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -63,10 +64,9 @@ func write(t *testing.T, path string, data []byte) {
 }
 
 func drain(ix *Index) {
-	h := &helperProc{nice: true}
-	for ix.processOne("pending", nil) {
+	for ix.processOne("pending") {
 	}
-	for ix.processOne("ocr", h) {
+	for ix.processOne("ocr") {
 	}
 }
 
@@ -424,14 +424,31 @@ func TestRemoteImageOCR(t *testing.T) {
 	write(t, filepath.Join(vault, "plain.md"), []byte("just some words"))
 	write(t, filepath.Join(vault, "again.md"), []byte("# Again\nsame picture ![pic]("+srv.URL+"/pic.png)"))
 
-	ix, err := openIndex(filepath.Join(t.TempDir(), "index.db"), vault)
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	ix, err := openIndex(dbPath, vault)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := ix.scan(true); err != nil {
 		t.Fatal(err)
 	}
+	for ix.processOne("pending") {
+	}
+	// queued: pic (in both notes, counted once) and the dead link
+	if n := ix.remoteLeft(); n != 2 {
+		t.Errorf("remote images left after the fast lane = %d, want 2", n)
+	}
+	// a restarted server recounts what an earlier run left queued
+	ix2, _ := openIndex(dbPath, vault)
+	ix2.countQueuedRemote()
+	if n := ix2.remoteLeft(); n != 2 {
+		t.Errorf("remote images left after a restart = %d, want 2", n)
+	}
+	ix2.db.Close()
 	drain(ix)
+	if s, _ := ix.status(); s["remote"] != 0 {
+		t.Errorf("remote images left after OCR = %v, want 0", s["remote"])
+	}
 
 	if got := paths(find(t, ix, "quokkawallaby")); got != "again.md:0 drive.md:0" && got != "drive.md:0 again.md:0" {
 		t.Errorf("remote OCR text on both host notes: %s", got)
@@ -615,4 +632,57 @@ func TestHelperStopsWhenIdle(t *testing.T) {
 		t.Fatal("idle helper was not stopped")
 	}
 	ask() // and it comes back on demand
+}
+
+func TestFetchHedgesStragglers(t *testing.T) {
+	defer func(old time.Duration) { hedgeAfter = old }(hedgeAfter)
+	hedgeAfter = 100 * time.Millisecond
+	var mu sync.Mutex
+	calls := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls[r.URL.Path]++
+		n := calls[r.URL.Path]
+		mu.Unlock()
+		switch {
+		case r.URL.Path == "/gone.png":
+			http.NotFound(w, r)
+			return
+		case r.URL.Path == "/stall.png" && n == 1: // the first request hangs, like a Drive straggler
+			select {
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Write([]byte("png bytes"))
+	}))
+	defer srv.Close()
+	tmpDir := t.TempDir()
+	t.Setenv("TMPDIR", tmpDir) // os.CreateTemp: see what's left behind
+
+	start := time.Now()
+	tmp, err := fetchImage(srv.URL + "/stall.png")
+	if err != nil || time.Since(start) > 2*time.Second {
+		t.Fatalf("a stalled download must be rescued by its hedge: %v after %v", err, time.Since(start))
+	}
+	os.Remove(tmp)
+	if _, err := fetchImage(srv.URL + "/gone.png"); err == nil {
+		t.Error("404 must fail")
+	}
+	if tmp, err := fetchImage(srv.URL + "/fast.png"); err != nil {
+		t.Error(err)
+	} else {
+		os.Remove(tmp)
+	}
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if calls["/stall.png"] != 2 || calls["/gone.png"] != 1 || calls["/fast.png"] != 1 {
+		t.Errorf("requests: %v; want 2 for the straggler, 1 for a quick 404 and a quick image", calls)
+	}
+	if left, _ := filepath.Glob(filepath.Join(tmpDir, "ss-remote-*")); len(left) > 0 {
+		t.Errorf("temp files left behind: %v", left)
+	}
 }

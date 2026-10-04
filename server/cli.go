@@ -298,7 +298,11 @@ func reportProgress(ix *Index) {
 		left := c["pending"] + c["ocr"]
 		switch {
 		case left > 0:
-			fmt.Printf("indexing: %d files left (%d done)\n", left, c["done"])
+			fmt.Printf("indexing: %d files left (%d done)", left, c["done"])
+			if r := s["remote"].(int); r > 0 {
+				fmt.Printf(", %d remote images", r)
+			}
+			fmt.Println()
 			busy = true
 			time.Sleep(25 * time.Second)
 		case busy:
@@ -385,6 +389,7 @@ func cliStatus() error {
 	}
 	var s struct {
 		Counts  map[string]int
+		Remote  int
 		Paused  bool
 		Missing []string
 	}
@@ -394,6 +399,9 @@ func cliStatus() error {
 	fmt.Printf("indexed: %d files", c["done"])
 	if left := c["pending"] + c["ocr"]; left > 0 {
 		fmt.Printf(", %d left", left)
+		if s.Remote > 0 {
+			fmt.Printf(" (%d remote images)", s.Remote)
+		}
 		if s.Paused {
 			fmt.Print(" (paused)")
 		}

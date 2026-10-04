@@ -54,7 +54,12 @@ type Index struct {
 	wmu    sync.Mutex  // SQLite is single-writer; serialize here instead of juggling SQLITE_BUSY
 	wakes  []chan struct{}
 
-	ah *helperProc // `supersearch-helper serve`, for ask
+	ah   *helperProc // `supersearch-helper serve`, for ask
+	pool *ocrPool    // OCR / transcription slots, shared by every job
+
+	rmu      sync.Mutex
+	inflight map[string]*remoteFlight // remote image URL → download + OCR in progress
+	backlog  remoteBacklog            // remote images still to read, for the status bar
 
 	cmu     sync.Mutex
 	claimed map[int64]bool // file ids a worker is processing right now
@@ -185,7 +190,7 @@ func openIndex(dbPath, vault string) (*Index, error) {
 			}
 		}
 	}
-	return &Index{db: db, vault: vault, ah: &helperProc{}}, nil
+	return &Index{db: db, vault: vault, ah: &helperProc{}, pool: newOCRPool(3)}, nil
 }
 
 // uriPath turns a file path into the path part of an SQLite file: URI.
@@ -551,5 +556,5 @@ func (ix *Index) status() (map[string]any, error) {
 		rows.Scan(&s, &n)
 		counts[s] = n
 	}
-	return map[string]any{"counts": counts, "paused": ix.paused.Load(), "missing": ix.missingTools()}, rows.Err()
+	return map[string]any{"counts": counts, "remote": ix.remoteLeft(), "paused": ix.paused.Load(), "missing": ix.missingTools()}, rows.Err()
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -49,7 +50,7 @@ const (
 
 	maxRemoteImages = 20       // remote images OCR'd per note
 	maxRemoteBytes  = 10 << 20 // per remote image; keeps the vault light, text only
-	maxRemoteFetch  = 8        // concurrent downloads per note; one slow image never stalls the rest
+	maxRemoteFetch  = 32       // concurrent downloads, all notes together (HTTP/2 multiplexes them)
 	remoteTimeout   = 30 * time.Second
 )
 
@@ -71,7 +72,6 @@ func normLang(l string) string {
 }
 
 // processOne runs one job in the given status. false = nothing to do.
-// h is this worker's helper process for image OCR (nil in the fast lane).
 // PDFs always take the text-layer path, even if an old index left them in
 // ocr status: Vision OCR never runs on rendered PDF pages, so a short title
 // page keeps its exact text instead of being replaced by an OCR misread
@@ -79,7 +79,7 @@ func normLang(l string) string {
 // (e.g. Google Drive embeds) take the slow lane so the fetch + OCR never
 // delays a note you just edited; only the OCR text is stored, never the
 // image bytes, so the vault stays light.
-func (ix *Index) processOne(status string, h *helperProc) bool {
+func (ix *Index) processOne(status string) bool {
 	j, ok := ix.next(status)
 	if !ok {
 		return false
@@ -94,20 +94,28 @@ func (ix *Index) processOne(status string, h *helperProc) bool {
 		case j.kind == "pdf":
 			pages, err = extract(abs, j.kind)
 		case j.kind == "text" && isMarkdown(abs):
-			pages, err = ix.noteRemoteOCR(abs, h)
+			pages, err = ix.noteRemoteOCR(j.id, abs)
 		default:
-			pages, err = ocr(abs, j.kind, h)
+			pages, err = ix.ocr(abs, j.kind)
 		}
 	} else {
 		pages, err = extract(abs, j.kind)
 		if err == nil && j.kind == "text" && isMarkdown(abs) && hasRemoteImages(pages) {
 			next = "ocr" // re-read in the slow lane with the remote OCR text
+			var text strings.Builder
+			for _, p := range pages {
+				text.WriteString(p.title + "\n" + p.body + "\n")
+			}
+			ix.backlog.set(j.id, ix.uncachedRemote(text.String())) // counted before it shows as queued
 		}
 	}
 	msg := ""
 	if err != nil {
 		next, msg, pages = "error", err.Error(), nil
 		pages = []page{{source: "text"}} // keep the file findable by name even though its content failed
+	}
+	if status == "ocr" || next != "ocr" {
+		ix.backlog.clear(j.id)
 	}
 	if err := ix.store(j, pages, next, msg); err != nil {
 		fmt.Fprintln(os.Stderr, "store:", j.rel, err)
@@ -128,19 +136,11 @@ func isMarkdown(abs string) bool {
 	return false
 }
 
-// worker n processes jobs in status forever. Extra OCR workers (n > 0) only
-// run on mains power: on battery OCR drops to one at a time.
-func (ix *Index) worker(status string, n int, wake chan struct{}) {
-	h := &helperProc{nice: true}
+// worker processes jobs in status forever. OCR CPU is bounded by ix.pool
+// (one at a time on battery), not by the number of workers.
+func (ix *Index) worker(status string, wake chan struct{}) {
 	for {
-		if status == "ocr" && n > 0 && onBattery() {
-			select { // no event fires when the charger is plugged in: re-check
-			case <-wake:
-			case <-time.After(time.Minute):
-			}
-			continue
-		}
-		if (status == "ocr" && ix.paused.Load()) || !ix.processOne(status, h) {
+		if (status == "ocr" && ix.paused.Load()) || !ix.processOne(status) {
 			<-wake
 		}
 	}
@@ -335,8 +335,10 @@ func xmlText(r io.Reader, sb *strings.Builder) {
 	}
 }
 
-// ocr is the slow second pass for images and audio.
-func ocr(abs, kind string, h *helperProc) ([]page, error) {
+// ocr is the slow second pass for images and audio, one pool slot each.
+func (ix *Index) ocr(abs, kind string) ([]page, error) {
+	h := ix.pool.acquire()
+	defer ix.pool.release(h)
 	if kind == "audio" {
 		body, err := transcribe(abs)
 		return []page{{source: "speech", body: body}}, err
@@ -393,13 +395,79 @@ func hasRemoteImages(pages []page) bool {
 	return false
 }
 
-var remoteClient = &http.Client{Timeout: remoteTimeout}
+// remoteClient keeps connections to each image host open and reusable: the
+// default keeps only 2 idle per host, so most downloads from one Drive or CDN
+// host paid a fresh TCP + TLS handshake.
+var remoteClient = &http.Client{
+	Timeout: remoteTimeout,
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   maxRemoteFetch,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 20 * time.Second, // a dead link fails fast instead of at the full timeout
+	},
+}
+
+// hedgeAfter: a download still running this long gets a second, identical
+// request racing it. Image hosts have a long latency tail: on Google Drive
+// (lh3.googleusercontent.com) most 240 KB images took 0.6 s, but about one in
+// twenty stalled for 2-15 s, before or during the body, and one straggler
+// held up its whole note. The second request almost always lands in 0.6 s.
+var hedgeAfter = 1500 * time.Millisecond
 
 // fetchImage downloads a remote image to a temp file (never into the vault).
 // Links that don't serve image bytes (viewer pages, login walls) are skipped
 // by the caller: use a direct / thumbnail link instead.
 func fetchImage(url string) (string, error) {
-	resp, err := remoteClient.Get(url)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // stops the losing request
+	type result struct {
+		tmp string
+		err error
+	}
+	results := make(chan result, 2)
+	try := func() {
+		tmp, err := fetchOnce(ctx, url)
+		results <- result{tmp, err}
+	}
+	go try()
+	hedge := time.NewTimer(hedgeAfter)
+	defer hedge.Stop()
+	running := 1
+	for {
+		select {
+		case <-hedge.C:
+			running++
+			go try()
+		case r := <-results:
+			running--
+			if r.err == nil || running == 0 {
+				// A failure before the hedge fired is final (404, not an
+				// image): no point asking twice. The loser, if any, finishes
+				// in the background and its file is removed.
+				go func(n int) {
+					for ; n > 0; n-- {
+						if l := <-results; l.err == nil {
+							os.Remove(l.tmp)
+						}
+					}
+				}(running)
+				return r.tmp, r.err
+			}
+		}
+	}
+}
+
+func fetchOnce(ctx context.Context, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := remoteClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -431,7 +499,7 @@ func fetchImage(url string) (string, error) {
 // the text read out of its remote images. Failed fetches are skipped: a dead
 // Drive link never fails the note itself. OCR text is cached by URL, so an
 // edited note only pays for images it hasn't seen before.
-func (ix *Index) noteRemoteOCR(abs string, h *helperProc) ([]page, error) {
+func (ix *Index) noteRemoteOCR(id int64, abs string) ([]page, error) {
 	b, err := readCapped(abs)
 	if err != nil {
 		return nil, err
@@ -448,7 +516,8 @@ func (ix *Index) noteRemoteOCR(abs string, h *helperProc) ([]page, error) {
 			missing = append(missing, u)
 		}
 	}
-	for u, body := range ix.fetchOCR(missing, h) {
+	ix.backlog.set(id, missing) // the note may have changed since it was queued
+	for u, body := range ix.fetchOCR(id, missing) {
 		textOf[u] = body
 	}
 	// One ocr chunk per image (page slot 0x40000+i) so the plugin can jump
@@ -479,85 +548,78 @@ func (ix *Index) cachedRemote(urls []string) map[string]string {
 	return out
 }
 
-// fetchOCR downloads and OCRs every URL, concurrently. Downloads run
-// maxRemoteFetch-at-a-time so one slow link never stalls the rest; OCR fans
-// out over a small pool of helpers (the worker's own plus spares) because a
-// single helper answers one request at a time. Failures resolve to "" and
-// are skipped by the caller.
-func (ix *Index) fetchOCR(urls []string, h *helperProc) map[string]string {
+// fetchOCR downloads and OCRs every URL, each image on its own: OCR starts
+// the moment its download lands, so one slow link never holds up the rest.
+// Failures resolve to "" and are skipped by the caller.
+func (ix *Index) fetchOCR(id int64, urls []string) map[string]string {
 	out := make(map[string]string, len(urls))
-	if len(urls) == 0 {
-		return out
-	}
-	type result struct {
-		url, tmp string
-	}
-	sem := make(chan struct{}, maxRemoteFetch)
-	res := make(chan result, len(urls))
+	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, u := range urls {
 		wg.Add(1)
-		go func(u string) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			tmp, err := fetchImage(u)
-			if err != nil {
-				res <- result{url: u}
-				return
-			}
-			res <- result{url: u, tmp: tmp}
-		}(u)
+			body := ix.remoteText(u)
+			ix.backlog.done(id, u)
+			mu.Lock()
+			out[u] = body
+			mu.Unlock()
+		}()
 	}
 	wg.Wait()
-	close(res)
-	files := map[string]string{} // url -> temp file
-	for r := range res {
-		if r.tmp != "" {
-			files[r.url] = r.tmp
-		}
-	}
-	// OCR pool: the worker's helper (model already loaded) plus spares.
-	// Helpers stop themselves after 30 s idle, so this costs nothing
-	// once the backlog drains.
-	pool := []*helperProc{h}
-	for range 3 {
-		pool = append(pool, &helperProc{nice: true})
-	}
-	if h == nil {
-		pool = pool[1:]
-	}
-	type ocrout struct {
-		url, body string
-	}
-	oc := make(chan ocrout, len(files))
-	var owg sync.WaitGroup
-	i := 0
-	for u, tmp := range files {
-		owg.Add(1)
-		go func(u, tmp string, hh *helperProc) {
-			defer owg.Done()
-			text, err := ocrFile(tmp, hh)
-			os.Remove(tmp)
-			if err != nil {
-				oc <- ocrout{url: u}
-				return
-			}
-			oc <- ocrout{url: u, body: strings.TrimSpace(text)}
-		}(u, tmp, pool[i%len(pool)])
-		i++
-	}
-	owg.Wait()
-	close(oc)
-	ix.wmu.Lock()
-	defer ix.wmu.Unlock()
-	for r := range oc {
-		out[r.url] = r.body
-		if r.body != "" {
-			ix.db.Exec(`INSERT OR REPLACE INTO remote_ocr(url, body) VALUES(?, ?)`, r.url, r.body)
-		}
-	}
 	return out
+}
+
+var fetchSlots = make(chan struct{}, maxRemoteFetch)
+
+type remoteFlight struct {
+	done chan struct{}
+	body string
+}
+
+// remoteText downloads one image and reads its text. Several notes embedding
+// the same URL at once share one download and one OCR. The download holds no
+// OCR slot, so network waits never idle the CPU.
+func (ix *Index) remoteText(u string) string {
+	ix.rmu.Lock()
+	if f := ix.inflight[u]; f != nil {
+		ix.rmu.Unlock()
+		<-f.done
+		return f.body
+	}
+	if ix.inflight == nil {
+		ix.inflight = map[string]*remoteFlight{}
+	}
+	f := &remoteFlight{done: make(chan struct{})}
+	ix.inflight[u] = f
+	ix.rmu.Unlock()
+	defer func() {
+		ix.rmu.Lock()
+		delete(ix.inflight, u)
+		ix.rmu.Unlock()
+		close(f.done)
+	}()
+
+	fetchSlots <- struct{}{}
+	tmp, err := fetchImage(u)
+	<-fetchSlots
+	if err != nil {
+		return ""
+	}
+	defer os.Remove(tmp)
+	h := ix.pool.acquire()
+	text, err := ocrFile(tmp, h)
+	ix.pool.release(h)
+	if err != nil {
+		return ""
+	}
+	f.body = strings.TrimSpace(text)
+	if f.body != "" {
+		ix.wmu.Lock()
+		ix.db.Exec(`INSERT OR REPLACE INTO remote_ocr(url, body) VALUES(?, ?)`, u, f.body)
+		ix.wmu.Unlock()
+	}
+	return f.body
 }
 
 var pdfCache struct { // the last pdf's text, so back-to-back reads reuse it

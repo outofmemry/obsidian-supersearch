@@ -110,17 +110,7 @@ func openVault(vault, dbPath string) (*Index, error) {
 
 // serve starts the workers and the periodic scan, then answers HTTP on ln.
 func serve(ix *Index, ln net.Listener, ocrWorkers int, token string) error {
-	// One fast worker for text/pdf/office, N slow ones for OCR, so a big OCR
-	// backlog never delays a note you just edited.
-	for n := range ocrWorkers + 1 {
-		wake := make(chan struct{}, 1)
-		ix.wakes = append(ix.wakes, wake)
-		if n == 0 {
-			go ix.worker("pending", 0, wake)
-		} else {
-			go ix.worker("ocr", n-1, wake)
-		}
-	}
+	ix.startWorkers(ocrWorkers)
 	// Full scan at startup (and retry files that failed), then a cheap rescan
 	// every minute: catches anything Obsidian never reported, and is the only
 	// change feed for a remote server whose vault is synced from elsewhere.
@@ -134,6 +124,24 @@ func serve(ix *Index, ln net.Listener, ocrWorkers int, token string) error {
 	}()
 
 	return http.Serve(ln, handler(ix, token))
+}
+
+// startWorkers runs one fast worker for text/pdf/office, so a big OCR backlog
+// never delays a note you just edited, and several slow-lane jobs. OCR CPU is
+// capped by the pool at ocrWorkers; the extra jobs are for notes whose remote
+// images are still downloading, which need the network, not the CPU.
+func (ix *Index) startWorkers(ocrWorkers int) {
+	ix.pool = newOCRPool(ocrWorkers)
+	go ix.countQueuedRemote()
+	for n := range 1 + max(12, 4*ocrWorkers) {
+		wake := make(chan struct{}, 1)
+		ix.wakes = append(ix.wakes, wake)
+		if n == 0 {
+			go ix.worker("pending", wake)
+		} else {
+			go ix.worker("ocr", wake)
+		}
+	}
 }
 
 func handler(ix *Index, token string) http.Handler {
@@ -272,7 +280,7 @@ func runQuery(ix *Index, q string) {
 	if err := ix.scan(true); err != nil {
 		log.Fatal(err)
 	}
-	for ix.processOne("pending", nil) {
+	for ix.processOne("pending") {
 	}
 	indexed := time.Since(start)
 	start = time.Now()

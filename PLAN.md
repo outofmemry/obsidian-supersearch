@@ -45,7 +45,7 @@ Obsidian plugin (TS)                     supersearch-server (Go, one binary)
 
 | Kind | Files | How |
 |---|---|---|
-| Notes | .md | split at headings: each section is a result that opens at its line; heading + #tags + frontmatter tags rank above body text; remote `![](https://…)` images are fetched (8 concurrent) and OCR'd into the note's rows, text cached by URL (vault stays light) |
+| Notes | .md | split at headings: each section is a result that opens at its line; heading + #tags + frontmatter tags rank above body text; remote `![](https://…)` images are fetched (32 concurrent across notes, OCR as each lands) and OCR'd into the note's rows, text cached by URL (vault stays light) |
 | Text / code | .txt .canvas .csv .json .yaml .go .py .ts … | read as-is |
 | PDF | .pdf | PDFKit text per page, no OCR (a scanned page with no text layer contributes no content) |
 | Images | .png .jpg .webp .heic .gif .tiff … | Apple Vision OCR (lines rebuilt in reading order, Cyrillic look-alikes folded, transparency flattened) |
